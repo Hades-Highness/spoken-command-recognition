@@ -1,0 +1,22 @@
+# Dataset and Models
+data/
+checkpoints/
+onnx/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Python & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Venv & IDE
+venv/
+env/
+.venv/
+.vscode/
+.idea/
+.DS_Store
