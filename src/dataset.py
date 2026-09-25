@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 import torchaudio
 import torchaudio.transforms as T
 from tqdm import tqdm
+
 from configs.config import (
     DATA_DIR, SAMPLE_RATE, TARGET_SAMPLES, 
     N_MELS, N_FFT, HOP_LENGTH
@@ -16,19 +17,21 @@ class SpeechCommandsDataset(Dataset):
         self.subset = subset
         self.cache_in_ram = cache_in_ram
         
-        # Téléchargement et extraction automatique dans ./data
+        print(f"[*] Indexing '{subset}' files from disk (scanning directory)...")
+        # Automatic dataset downloading & path resolution via torchaudio
         self.raw_dataset = torchaudio.datasets.SPEECHCOMMANDS(
             root=DATA_DIR,
             url="speech_commands_v0.02",
             download=True,
             subset=subset
         )
+        print(f"[+] Found {len(self.raw_dataset)} samples for '{subset}'.")
         
-        # Extraction des 35 classes
+        # Extract the 35 target classes
         self.labels = sorted(list(set(sample[2] for sample in self.raw_dataset)))
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
         
-        # Transformation Log-Mel Spectrogram
+        # Log-Mel Spectrogram Transformation
         self.mel_spectrogram = T.MelSpectrogram(
             sample_rate=SAMPLE_RATE,
             n_fft=N_FFT,
@@ -41,23 +44,32 @@ class SpeechCommandsDataset(Dataset):
         self.cached_targets = []
         
         if self.cache_in_ram:
-            print(f"[*] Chargement et mise en cache du dataset ({subset}) en RAM...")
-            for idx in tqdm(range(len(self.raw_dataset))):
+            print(f"[*] Caching {len(self.raw_dataset)} samples to RAM...")
+            # Barre tqdm explicite avec rafraichissement forcé
+            for idx in tqdm(
+                range(len(self.raw_dataset)), 
+                desc=f"Caching {subset} set", 
+                unit="files", 
+                mininterval=0.1
+            ):
                 feat, target = self._process_sample(idx)
                 self.cached_features.append(feat)
                 self.cached_targets.append(target)
-            print(f"[+] {len(self.cached_features)} échantillons chargés en RAM.")
+            print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
     def _process_sample(self, idx):
         waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
         
+        # Resample to 16kHz if necessary
         if sample_rate != SAMPLE_RATE:
             resampler = T.Resample(orig_freq=sample_rate, new_freq=SAMPLE_RATE)
             waveform = resampler(waveform)
             
+        # Convert stereo to mono
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
             
+        # Pad or crop to target 1 second length (16,000 samples)
         num_samples = waveform.shape[1]
         if num_samples < TARGET_SAMPLES:
             padding = TARGET_SAMPLES - num_samples
@@ -65,6 +77,7 @@ class SpeechCommandsDataset(Dataset):
         elif num_samples > TARGET_SAMPLES:
             waveform = waveform[:, :TARGET_SAMPLES]
             
+        # Compute Log-Mel Spectrogram
         mel_spec = self.mel_spectrogram(waveform)
         log_mel_spec = torch.log(mel_spec + 1e-6)
         
