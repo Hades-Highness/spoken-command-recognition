@@ -18,12 +18,13 @@ N_FFT = 1024
 HOP_LENGTH = 256
 
 # Configuration Entraînement
-BATCH_SIZE = 128
-NUM_WORKERS = 4
+BATCH_SIZE = 256
+NUM_WORKERS = 0
 LEARNING_RATE = 1e-3
 EPOCHS = 20
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Modèle & Versioning
-MODEL_NAME = "CommandSense_v1.0"
+MODEL_NAME = "CommandSense"
+MODEL_VERSION = "v1.0"
 NUM_CLASSES = 35

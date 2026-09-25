@@ -6,17 +6,21 @@ import seaborn as sns
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 
-from configs.config import BATCH_SIZE
+from configs.config import MODEL_NAME, MODEL_VERSION, BATCH_SIZE, CHECKPOINT_DIR
 from src.dataset import SpeechCommandsDataset
 from src.models import CommandSense
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = "checkpoints/CommandSense_v1.pth"
+    print(f"[*] Hardware device: {device}")
 
+    # Clean checkpoint filename
+    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{MODEL_NAME}_{MODEL_VERSION}.pth")
     if not os.path.exists(checkpoint_path):
-        print(f"[!] Error: File {checkpoint_path} not found.")
+        print(f"[!] Error: Model checkpoint file not found at {checkpoint_path}")
         return
+
+    print(f"[*] Loading model checkpoint: {checkpoint_path}")
 
     test_dataset = SpeechCommandsDataset(subset="testing", cache_in_ram=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
@@ -37,7 +41,7 @@ def main():
     class_names = test_dataset.labels
 
     # Print Classification Report
-    print("\n--- CLASSIFICATION REPORT ---")
+    print(f"\n--- CLASSIFICATION REPORT ({MODEL_NAME} {MODEL_VERSION}) ---")
     print(classification_report(all_targets, all_preds, target_names=class_names, digits=4))
 
     # Dark Mode Confusion Matrix Plot
@@ -50,13 +54,15 @@ def main():
     sns.heatmap(cm, annot=False, fmt='d', cmap='mako', 
                 xticklabels=class_names, yticklabels=class_names, ax=ax)
     
-    plt.title('Confusion Matrix - CommandSense v1.0', color='#c9d1d9', fontsize=16, pad=20)
+    plt.title(f'Confusion Matrix - {MODEL_NAME} {MODEL_VERSION}', color='#c9d1d9', fontsize=16, pad=20)
     plt.xlabel('Predicted Label', color='#8b949e', fontsize=12)
     plt.ylabel('True Label', color='#8b949e', fontsize=12)
     
     os.makedirs("reports", exist_ok=True)
-    plt.savefig("reports/confusion_matrix.png", dpi=300, facecolor=fig.get_facecolor(), bbox_inches='tight')
-    print("[+] Dark mode confusion matrix saved -> reports/confusion_matrix.png")
+    plt.savefig(f"reports/confusion_matrix_{MODEL_VERSION}.png", dpi=300, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.close()
+
+    print(f"[+] Confusion matrix saved -> reports/confusion_matrix.png ({MODEL_NAME} {MODEL_VERSION})")
 
 if __name__ == "__main__":
     main()

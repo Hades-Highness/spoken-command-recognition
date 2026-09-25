@@ -1,11 +1,11 @@
 import os
 import torch
 from src.models import CommandSense
-from configs.config import NUM_CLASSES
+from configs.config import MODEL_VERSION, NUM_CLASSES
 
 def export_to_onnx():
-    checkpoint_path = "checkpoints/CommandSense_v1.pth"
-    onnx_path = "checkpoints/CommandSense_v1.onnx"
+    checkpoint_path = f"checkpoints/CommandSense_{MODEL_VERSION}.pth"
+    onnx_path = F"checkpoints/CommandSense_{MODEL_VERSION}.onnx"
     
     if not os.path.exists(checkpoint_path):
         print(f"[!] Error: Checkpoint {checkpoint_path} does not exist.")
