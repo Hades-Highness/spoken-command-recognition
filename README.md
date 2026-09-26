@@ -18,7 +18,7 @@ An end-to-end deep learning pipeline for spoken keyword spotting and audio comma
 
 ---
 
-## - Audio Technical Specifications (v1.0 Final)
+## - Audio Technical Specifications
 
 * **Sampling Rate ($f_s$)**: 16,000 Hz (mono)
 * **Normalized Duration**: 1.0 second (16,000 samples)
@@ -55,9 +55,9 @@ Model artifacts **(`.pth` and `.onnx`)** for official releases are available in 
 
 ## - Performance & Progression Summary
 
-| Version | Dataset Composition | Target Classes | Best Val Acc | Backends | Model Card / Curves |
-| :--- | :--- | :---: | :---: | :---: | :--- |
-| **v1.0** | 100% Speech Commands v0.02 | 35 Classes | **94.66%** | `.pth` / `.onnx` | [📄 Model Card v1.0](reports/model_v1.0/README.md) |
+| Version | Dataset Composition | Target Classes | Best Val Acc | Training Curves |
+| :--- | :--- | :---: | :---: | :--- |
+| **v1.0** | Speech Commands v0.02 | 35 Classes | **94.66%** | ![Training Curves](reports/model_v1.0/training_curves_v1.0.png) |
 
 ---
 
