@@ -1,5 +1,7 @@
 import os
 import json
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -11,7 +13,16 @@ from configs.config import MODEL_NAME, MODEL_VERSION, BATCH_SIZE, EPOCHS, LEARNI
 from src.dataset import SpeechCommandsDataset
 from src.models import CommandSense
 
-def save_plots(history, model_name, model_version):
+def set_seed(seed: int = 42) -> None:
+    """Set global random seeds for deterministic reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def save_plots(history: dict, model_name: str, model_version: str) -> None:
     os.makedirs("reports", exist_ok=True)
     plt.style.use('dark_background')
     
@@ -43,7 +54,7 @@ def save_plots(history, model_name, model_version):
     ax2.legend()
 
     plt.tight_layout()
-    plt.savefig(f"reports/training_curves_{MODEL_VERSION}.png", dpi=300, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.savefig(f"reports/training_curves_{model_version}.png", dpi=300, facecolor=fig.get_facecolor(), bbox_inches='tight')
     plt.close()
 
     # Save JSON history with model metadata
@@ -53,10 +64,10 @@ def save_plots(history, model_name, model_version):
         "history": history
     }
 
-    with open(f"reports/history_{MODEL_VERSION}.json", "w") as f:
+    with open(f"reports/history_{model_version}.json", "w") as f:
         json.dump(export_data, f, indent=4)
         
-    print(f"[+] Training curves saved -> reports/training_curves.png ({model_name} {model_version})")
+    print(f"[+] Training curves and history saved -> reports/ ({model_name} {model_version})")
 
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
     model.train()
@@ -102,6 +113,10 @@ def evaluate(model, dataloader, criterion, device):
     return running_loss / total, 100.0 * correct / total
 
 def main():
+    # 1. Set global seed for deterministic results (v2.0.0)
+    set_seed(42)
+    print("[*] Global seed set to: 42")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[*] Hardware device: {device}")
 
@@ -115,16 +130,24 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-    model = CommandSense(num_classes=35, in_channels=1).to(device)
+    # 2. Save labels.json alongside checkpoint directory (v2.0.0)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    labels_path = os.path.join(CHECKPOINT_DIR, "labels.json")
+    if hasattr(train_dataset, "labels"):
+        with open(labels_path, "w") as f:
+            json.dump(train_dataset.labels, f, indent=4)
+        print(f"[+] Saved class mapping -> {labels_path}")
+
+    # 3. Instantiate model with 3-channel input for v2.0.0
+    model = CommandSense(num_classes=35, in_channels=3).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scaler = GradScaler("cuda" if device.type == "cuda" else "cpu")
 
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
     best_val_acc = 0.0
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
-    # Clean checkpoint path without suffixes
+    # Checkpoint path
     checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{MODEL_NAME}_{MODEL_VERSION}.pth")
 
     print(f"\n--- Starting {MODEL_NAME} {MODEL_VERSION} Training ---")
@@ -143,7 +166,7 @@ def main():
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 torch.save(model.state_dict(), checkpoint_path)
-                print(f"  [+] New best model saved ({val_acc:.2f}%) -> {checkpoint_path}")
+                print(f"   [+] New best model saved ({val_acc:.2f}%) -> {checkpoint_path}")
 
     except KeyboardInterrupt:
         print("\n\n[!] Manual interruption detected. Stopping training process gracefully...")

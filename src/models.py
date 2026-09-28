@@ -39,7 +39,7 @@ class CommandSense(nn.Module):
     Entrée : [Batch, 1, N_MELS (64), FRAMES (63)]
     Sortie : Logits [Batch, 35]
     """
-    def __init__(self, num_classes=NUM_CLASSES, in_channels=1):
+    def __init__(self, num_classes=NUM_CLASSES, in_channels=3):
         super().__init__()
         
         # Couche d'entrée / Préparation des features

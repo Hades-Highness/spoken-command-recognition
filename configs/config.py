@@ -26,5 +26,5 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Modèle & Versioning
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v1.0"
+MODEL_VERSION = "v2.0"
 NUM_CLASSES = 35

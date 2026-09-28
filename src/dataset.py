@@ -31,7 +31,7 @@ class SpeechCommandsDataset(Dataset):
         self.labels = sorted(list(set(sample[2] for sample in self.raw_dataset)))
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
         
-        # Log-Mel Spectrogram Transformation
+        # 1. Log-Mel Spectrogram Transformation
         self.mel_spectrogram = T.MelSpectrogram(
             sample_rate=SAMPLE_RATE,
             n_fft=N_FFT,
@@ -40,15 +40,17 @@ class SpeechCommandsDataset(Dataset):
             n_mels=N_MELS
         )
         
+        # 2. Delta & Delta-Delta Transformations for 3-Channel Spectrograms (v2.0.0)
+        self.compute_deltas = T.ComputeDeltas()
+        
         self.cached_features = []
         self.cached_targets = []
         
         if self.cache_in_ram:
-            print(f"[*] Caching {len(self.raw_dataset)} samples to RAM...")
-            # Barre tqdm explicite avec rafraichissement forcé
+            print(f"[*] Caching {len(self.raw_dataset)} 3-channel samples to RAM...")
             for idx in tqdm(
                 range(len(self.raw_dataset)), 
-                desc=f"Caching {subset} set", 
+                desc=f"Caching {subset} set (3-channels)", 
                 unit="files", 
                 mininterval=0.1
             ):
@@ -77,12 +79,19 @@ class SpeechCommandsDataset(Dataset):
         elif num_samples > TARGET_SAMPLES:
             waveform = waveform[:, :TARGET_SAMPLES]
             
-        # Compute Log-Mel Spectrogram
+        # Compute Log-Mel Spectrogram (Channel 1)
         mel_spec = self.mel_spectrogram(waveform)
         log_mel_spec = torch.log(mel_spec + 1e-6)
         
+        # Compute Delta (Channel 2) and Delta-Delta (Channel 3)
+        delta_spec = self.compute_deltas(log_mel_spec)
+        delta2_spec = self.compute_deltas(delta_spec)
+        
+        # Concatenate along channel dimension -> Shape: (3, N_MELS, T)
+        three_channel_spec = torch.cat([log_mel_spec, delta_spec, delta2_spec], dim=0)
+        
         target_idx = torch.tensor(self.label_to_idx[label], dtype=torch.long)
-        return log_mel_spec, target_idx
+        return three_channel_spec, target_idx
 
     def __len__(self):
         return len(self.raw_dataset)
