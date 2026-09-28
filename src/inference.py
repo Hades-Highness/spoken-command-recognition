@@ -1,13 +1,16 @@
 import os
+import sys
 import json
 import torch
 import torch.nn.functional as F
 import numpy as np
 import onnxruntime as ort
 
-from configs.config import MODEL_NAME, MODEL_VERSION, NUM_CLASSES, CHECKPOINT_DIR
 from src.models import CommandSense
 from src.utils import load_and_preprocess_audio
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from configs.config import MODEL_NAME, MODEL_VERSION, NUM_CLASSES, CHECKPOINT_DIR
 
 CLASS_NAMES = [
     'backward', 'bed', 'bird', 'cat', 'dog', 'down', 'eight', 'five', 'follow',

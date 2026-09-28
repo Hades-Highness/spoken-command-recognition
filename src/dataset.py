@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
@@ -6,9 +7,10 @@ import torchaudio
 import torchaudio.transforms as T
 from tqdm import tqdm
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from configs.config import (
-    DATA_DIR, SAMPLE_RATE, TARGET_SAMPLES, 
-    N_MELS, N_FFT, HOP_LENGTH
+    SAMPLE_RATE, TARGET_SAMPLES, N_FFT, HOP_LENGTH, N_MELS
 )
 
 class SpeechCommandsDataset(Dataset):

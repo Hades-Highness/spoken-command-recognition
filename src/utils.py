@@ -1,8 +1,11 @@
+import os
+import sys
 import torch
 import torch.nn.functional as F
 import torchaudio
 import torchaudio.transforms as T
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from configs.config import SAMPLE_RATE, TARGET_SAMPLES, N_FFT, HOP_LENGTH, N_MELS
 
 def load_and_preprocess_audio(audio_path, device="cpu"):
