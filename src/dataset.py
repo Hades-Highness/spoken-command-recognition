@@ -8,9 +8,8 @@ import torchaudio.transforms as T
 from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from configs.config import (
-    SAMPLE_RATE, TARGET_SAMPLES, N_FFT, HOP_LENGTH, N_MELS
+    SAMPLE_RATE, TARGET_SAMPLES, N_FFT, HOP_LENGTH, N_MELS, DATA_DIR
 )
 
 class SpeechCommandsDataset(Dataset):
@@ -29,7 +28,7 @@ class SpeechCommandsDataset(Dataset):
         )
         print(f"[+] Found {len(self.raw_dataset)} samples for '{subset}'.")
         
-        # Extract the 35 target classes
+        # Extract the target classes
         self.labels = sorted(list(set(sample[2] for sample in self.raw_dataset)))
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
         
@@ -102,3 +101,8 @@ class SpeechCommandsDataset(Dataset):
         if self.cache_in_ram:
             return self.cached_features[idx], self.cached_targets[idx]
         return self._process_sample(idx)
+
+if __name__ == "__main__":
+    print("[*] Testing SpeechCommandsDataset initialization & triggering download...")
+    dataset = SpeechCommandsDataset(subset="validation", cache_in_ram=False)
+    print(f"[+] Dataset successfully loaded! Total samples: {len(dataset)}")
