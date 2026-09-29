@@ -6,6 +6,7 @@ matplotlib
 seaborn
 scikit-learn
 onnx
+onnxscript
 onnxruntime
 gradio
 tqdm
