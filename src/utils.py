@@ -1,7 +1,11 @@
+import os
+import sys
 import torch
 import torchaudio
 import soundfile as sf
 from src.models import AudioFeatureExtractor
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from configs.config import SAMPLE_RATE
 
 
