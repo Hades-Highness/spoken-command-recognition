@@ -1,0 +1,48 @@
+--- CLASSIFICATION REPORT (CommandSense v1.0, 1-channel) ---
+Produced by scripts/evaluate_v1_legacy.py (archived v1.0.0 pipeline)
+Checkpoint: C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v1.0\CommandSense_v1.0.pth
+Parameters: 1,216,259
+Samples: 11005  Accuracy: 94.4571%
+Correct: 10395/11005
+
+              precision    recall  f1-score   support
+
+    backward     0.9877    0.9697    0.9786       165
+         bed     0.9261    0.9082    0.9171       207
+        bird     1.0000    0.8811    0.9368       185
+         cat     0.9095    0.9330    0.9211       194
+         dog     0.9757    0.9136    0.9437       220
+        down     0.9612    0.9163    0.9382       406
+       eight     0.9240    0.9828    0.9525       408
+        five     0.9751    0.9663    0.9707       445
+      follow     0.9536    0.8372    0.8916       172
+     forward     0.9241    0.8645    0.8933       155
+        four     0.9466    0.9300    0.9382       400
+          go     0.9187    0.9279    0.9233       402
+       happy     0.9646    0.9409    0.9526       203
+       house     0.9113    0.9686    0.9391       191
+       learn     0.9429    0.8199    0.8771       161
+        left     0.9218    0.9733    0.9469       412
+      marvin     0.9442    0.9538    0.9490       195
+        nine     0.9467    0.9583    0.9525       408
+          no     0.8700    0.9753    0.9197       405
+         off     0.9891    0.9005    0.9427       402
+          on     0.9199    0.9571    0.9381       396
+         one     0.9662    0.9323    0.9490       399
+       right     0.8924    0.9848    0.9364       396
+       seven     0.9974    0.9581    0.9774       406
+      sheila     0.8918    0.9717    0.9300       212
+         six     0.9796    0.9772    0.9784       394
+        stop     0.9692    0.9951    0.9820       411
+       three     0.9273    0.9136    0.9204       405
+        tree     0.9066    0.8549    0.8800       193
+         two     0.9181    0.9788    0.9475       424
+          up     0.9154    0.9671    0.9405       425
+      visual     0.9936    0.9455    0.9689       165
+         wow     0.9844    0.9175    0.9497       206
+         yes     0.9951    0.9737    0.9843       419
+        zero     0.9774    0.9306    0.9534       418
+
+    accuracy                         0.9446     11005
+   macro avg     0.9465    0.9365    0.9406     11005
+weighted avg     0.9461    0.9446    0.9445     11005

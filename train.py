@@ -1,19 +1,47 @@
-import os
+"""Training pipeline for CommandSense.
+
+Writes everything into the versioned folder for the current MODEL_VERSION:
+
+    checkpoints/model_v2.0/CommandSense_v2.0.pth
+    reports/model_v2.0/history_v2.0.json
+    reports/model_v2.0/training_curves_v2.0.png
+    configs/labels.json                        (index -> class name mapping)
+"""
+
 import json
+import os
 import random
+import sys
+
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
-from configs.config import MODEL_NAME, MODEL_VERSION, BATCH_SIZE, EPOCHS, LEARNING_RATE, CHECKPOINT_DIR
-from src.dataset import SpeechCommandsDataset
-from src.models import CommandSense
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-def set_seed(seed: int = 42) -> None:
+from configs.config import (  # noqa: E402
+    BATCH_SIZE,
+    CHECKPOINT_DIR,
+    EPOCHS,
+    LABELS_PATH,
+    LEARNING_RATE,
+    MODEL_NAME,
+    MODEL_VERSION,
+    NUM_WORKERS,
+    SEED,
+    WEIGHT_DECAY,
+    checkpoint_dir,
+    reports_dir,
+)
+from src.dataset import SpeechCommandsDataset  # noqa: E402
+from src.models import CommandSense  # noqa: E402
+
+
+def set_seed(seed: int = SEED) -> None:
     """Set global random seeds for deterministic reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
@@ -22,52 +50,72 @@ def set_seed(seed: int = 42) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def save_plots(history: dict, model_name: str, model_version: str) -> None:
-    os.makedirs("reports", exist_ok=True)
-    plt.style.use('dark_background')
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), facecolor='#0d1117')
-    ax1.set_facecolor('#0d1117')
-    ax2.set_facecolor('#0d1117')
 
-    # Main Title featuring Model Name and Version
-    fig.suptitle(f"{model_name} {model_version} - Training Metrics", color='#c9d1d9', fontsize=16, fontweight='bold')
+def save_labels(labels, path=LABELS_PATH) -> None:
+    """Persist the index -> class name mapping next to the source code.
+
+    The file is committed, so it is only rewritten when the mapping actually
+    changes; this keeps training runs from dirtying the working tree.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            if json.load(handle) == labels:
+                return
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(labels, handle, indent=4)
+        handle.write("\n")
+    print(f"[+] Updated class mapping -> {path}")
+
+
+def save_reports(history, model_name, model_version, suffix=""):
+    """Write the metric history and the training curves into the version folder."""
+    out_dir = reports_dir(model_version)
+    os.makedirs(out_dir, exist_ok=True)
+
+    plt.style.use("dark_background")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), facecolor="#0d1117")
+    ax1.set_facecolor("#0d1117")
+    ax2.set_facecolor("#0d1117")
+    fig.suptitle(
+        f"{model_name} {model_version} - Training Metrics",
+        color="#c9d1d9", fontsize=16, fontweight="bold",
+    )
 
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    # Loss Plot
-    ax1.plot(epochs, history["train_loss"], color='#58a6ff', label="Train Loss", linewidth=2)
-    ax1.plot(epochs, history["val_loss"], color='#f85149', label="Val Loss", linewidth=2)
-    ax1.set_title("Training & Validation Loss", color='#c9d1d9', fontsize=12, fontweight='bold')
-    ax1.set_xlabel("Epoch", color='#8b949e')
-    ax1.set_ylabel("Loss", color='#8b949e')
-    ax1.grid(True, linestyle='--', alpha=0.2)
+    ax1.plot(epochs, history["train_loss"], color="#58a6ff", label="Train Loss", linewidth=2)
+    ax1.plot(epochs, history["val_loss"], color="#f85149", label="Val Loss", linewidth=2)
+    ax1.set_title("Training & Validation Loss", color="#c9d1d9", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Epoch", color="#8b949e")
+    ax1.set_ylabel("Loss", color="#8b949e")
+    ax1.grid(True, linestyle="--", alpha=0.2)
     ax1.legend()
 
-    # Accuracy Plot
-    ax2.plot(epochs, history["train_acc"], color='#58a6ff', label="Train Accuracy", linewidth=2)
-    ax2.plot(epochs, history["val_acc"], color='#f85149', label="Val Accuracy", linewidth=2)
-    ax2.set_title("Training & Validation Accuracy", color='#c9d1d9', fontsize=12, fontweight='bold')
-    ax2.set_xlabel("Epoch", color='#8b949e')
-    ax2.set_ylabel("Accuracy (%)", color='#8b949e')
-    ax2.grid(True, linestyle='--', alpha=0.2)
+    ax2.plot(epochs, history["train_acc"], color="#58a6ff", label="Train Accuracy", linewidth=2)
+    ax2.plot(epochs, history["val_acc"], color="#f85149", label="Val Accuracy", linewidth=2)
+    ax2.set_title("Training & Validation Accuracy", color="#c9d1d9", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Epoch", color="#8b949e")
+    ax2.set_ylabel("Accuracy (%)", color="#8b949e")
+    ax2.grid(True, linestyle="--", alpha=0.2)
     ax2.legend()
 
     plt.tight_layout()
-    plt.savefig(f"reports/training_curves_{model_version}.png", dpi=300, facecolor=fig.get_facecolor(), bbox_inches='tight')
+    curves_path = os.path.join(out_dir, f"training_curves_{model_version}{suffix}.png")
+    plt.savefig(curves_path, dpi=300, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close()
 
-    # Save JSON history with model metadata
-    export_data = {
-        "model_name": model_name,
-        "model_version": model_version,
-        "history": history
-    }
+    history_path = os.path.join(out_dir, f"history_{model_version}{suffix}.json")
+    with open(history_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"model_name": model_name, "model_version": model_version, "history": history},
+            handle,
+            indent=4,
+        )
 
-    with open(f"reports/history_{model_version}.json", "w") as f:
-        json.dump(export_data, f, indent=4)
-        
-    print(f"[+] Training curves and history saved -> reports/ ({model_name} {model_version})")
+    print(f"[+] Saved {curves_path}")
+    print(f"[+] Saved {history_path}")
+
 
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
     model.train()
@@ -95,6 +143,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
 
     return running_loss / total, 100.0 * correct / total
 
+
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device):
     model.eval()
@@ -112,10 +161,10 @@ def evaluate(model, dataloader, criterion, device):
 
     return running_loss / total, 100.0 * correct / total
 
+
 def main():
-    # 1. Set global seed for deterministic results (v2.0.0)
-    set_seed(42)
-    print("[*] Global seed set to: 42")
+    set_seed(SEED)
+    print(f"[*] Global seed set to: {SEED}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[*] Hardware device: {device}")
@@ -126,34 +175,39 @@ def main():
     print("\n[*] Loading Validation Dataset into RAM...")
     val_dataset = SpeechCommandsDataset(subset="validation", cache_in_ram=True)
 
-    print("\n[+] Datasets successfully cached! Initializing DataLoaders...")
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    print("\n[+] Datasets cached! Initializing DataLoaders...")
+    generator = torch.Generator().manual_seed(SEED)
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=NUM_WORKERS, generator=generator,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS,
+    )
 
-    # 2. Save labels.json alongside checkpoint directory (v2.0.0)
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    labels_path = os.path.join(CHECKPOINT_DIR, "labels.json")
-    if hasattr(train_dataset, "labels"):
-        with open(labels_path, "w") as f:
-            json.dump(train_dataset.labels, f, indent=4)
-        print(f"[+] Saved class mapping -> {labels_path}")
+    save_labels(train_dataset.labels)
 
-    # 3. Instantiate model with 3-channel input for v2.0.0
-    model = CommandSense(num_classes=35, in_channels=3).to(device)
+    model = CommandSense(num_classes=len(train_dataset.labels), in_channels=3).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scaler = GradScaler("cuda" if device.type == "cuda" else "cpu")
 
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
     best_val_acc = 0.0
-    
-    # Checkpoint path
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"{MODEL_NAME}_{MODEL_VERSION}.pth")
+
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(checkpoint_dir(MODEL_VERSION), exist_ok=True)
+    checkpoint_path = os.path.join(
+        checkpoint_dir(MODEL_VERSION), f"{MODEL_NAME}_{MODEL_VERSION}.pth"
+    )
 
     print(f"\n--- Starting {MODEL_NAME} {MODEL_VERSION} Training ---")
+    interrupted = False
     try:
         for epoch in range(1, EPOCHS + 1):
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device)
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader, criterion, optimizer, scaler, device
+            )
             val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
             history["train_loss"].append(train_loss)
@@ -161,7 +215,11 @@ def main():
             history["val_loss"].append(val_loss)
             history["val_acc"].append(val_acc)
 
-            print(f"Epoch [{epoch}/{EPOCHS}] | Train Loss: {train_loss:.4f} - Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.2f}%")
+            print(
+                f"Epoch [{epoch}/{EPOCHS}] | Train Loss: {train_loss:.4f} - "
+                f"Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} - "
+                f"Val Acc: {val_acc:.2f}%"
+            )
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
@@ -169,15 +227,25 @@ def main():
                 print(f"   [+] New best model saved ({val_acc:.2f}%) -> {checkpoint_path}")
 
     except KeyboardInterrupt:
-        print("\n\n[!] Manual interruption detected. Stopping training process gracefully...")
+        interrupted = True
+        print("\n\n[!] Manual interruption detected. Stopping training gracefully...")
 
     finally:
-        completed_epochs = len(history["train_loss"])
-        if completed_epochs > 0:
-            print(f"\n[*] Generating reports and graphs for {completed_epochs} completed epoch(s)...")
-            save_plots(history, model_name=MODEL_NAME, model_version=MODEL_VERSION)
-        else:
-            print("\n[!] No completed epochs were executed. No graph generated.")
+        completed = len(history["train_loss"])
+        if completed == 0:
+            print("\n[!] No completed epochs. Nothing written.")
+            return
+
+        # An interrupted run must never overwrite an already published history,
+        # so it is written under a distinct name.
+        save_reports(
+            history, MODEL_NAME, MODEL_VERSION,
+            suffix="_interrupted" if interrupted else "",
+        )
+        print(f"\n[*] Best validation accuracy: {best_val_acc:.2f}% over {completed} epochs")
+        if interrupted:
+            print("[!] Run was interrupted: the *_interrupted files are not release artifacts.")
+
 
 if __name__ == "__main__":
     main()
