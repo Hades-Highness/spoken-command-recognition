@@ -1,9 +1,4 @@
-"""Speech Commands dataset supporting 37 classes (35 original + _silence_ + _unknown_).
-
-Features are produced by ``AudioFeatureExtractor`` (src/models.py) via
-``prepare_waveform`` (src/utils.py), maintaining consistency with inference.
-"""
-
+import gc
 import os
 import random
 import sys
@@ -58,22 +53,21 @@ class SpeechCommandsDataset(Dataset):
             
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
 
-        # Load samples list: tuples of (waveform, sample_rate, label)
-        self.samples = []
-        for waveform, sample_rate, label, _, _ in self.raw_dataset:
-            self.samples.append((waveform, sample_rate, label))
+        # Extra samples buffer for _silence_ and _unknown_ classes only
+        self.extra_samples = []
+        self._generate_extra_samples()
 
-        # Ensure _silence_ and _unknown_ samples exist/are injected
-        self._ensure_extra_classes()
+        self.num_raw = len(self.raw_dataset)
+        self.num_total = self.num_raw + len(self.extra_samples)
 
         self.feature_extractor = AudioFeatureExtractor()
         self.cached_features = []
         self.cached_targets = []
 
         if self.cache_in_ram:
-            print(f"[*] Caching {len(self.samples)} samples to RAM as 3-channel features...")
+            print(f"[*] Caching {self.num_total} samples to RAM as 3-channel features...")
             for idx in tqdm(
-                range(len(self.samples)),
+                range(self.num_total),
                 desc=f"Caching {subset} set",
                 unit="files",
                 mininterval=0.5,
@@ -81,10 +75,16 @@ class SpeechCommandsDataset(Dataset):
                 feature, target = self._process_sample(idx)
                 self.cached_features.append(feature)
                 self.cached_targets.append(target)
+
+            # Instantly release extra raw waveforms from RAM after feature extraction
+            del self.extra_samples
+            self.extra_samples = []
+            gc.collect()
+
             print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
-    def _ensure_extra_classes(self):
-        """Generates and appends _silence_ and _unknown_ samples for the subset."""
+    def _generate_extra_samples(self):
+        """Generates _silence_ and _unknown_ samples for the subset."""
         base_dir = os.path.join(DATA_DIR, "SpeechCommands", "speech_commands_v0.02")
         bg_dir = os.path.join(base_dir, "_background_noise_")
         
@@ -95,32 +95,39 @@ class SpeechCommandsDataset(Dataset):
                 for f in os.listdir(bg_dir)
                 if f.endswith(".wav")
             ]
-            num_silence = int(len(self.raw_dataset) * 0.05)  # ~5% of dataset size
-            
-            for _ in range(num_silence):
-                bg_file = random.choice(bg_files)
-                waveform, sr = torchaudio.load(bg_file)
-                
-                if waveform.shape[1] > TARGET_SAMPLES:
-                    max_start = waveform.shape[1] - TARGET_SAMPLES
-                    start = random.randint(0, max_start)
-                    chunk = waveform[:, start : start + TARGET_SAMPLES]
-                else:
-                    chunk = waveform
-                
-                # Apply random gain scaling
-                chunk = chunk * random.uniform(0.1, 1.0)
-                self.samples.append((chunk, sr, "_silence_"))
+            if bg_files:
+                num_silence = int(len(self.raw_dataset) * 0.05)  # ~5% of dataset size
+                for _ in range(num_silence):
+                    bg_file = random.choice(bg_files)
+                    waveform, sr = torchaudio.load(bg_file)
+                    
+                    if waveform.shape[1] > TARGET_SAMPLES:
+                        max_start = waveform.shape[1] - TARGET_SAMPLES
+                        start = random.randint(0, max_start)
+                        chunk = waveform[:, start : start + TARGET_SAMPLES]
+                    else:
+                        chunk = waveform
+                    
+                    # Apply random gain scaling
+                    chunk = chunk * random.uniform(0.1, 1.0)
+                    self.extra_samples.append((chunk, sr, "_silence_"))
 
-        # 2. Inject _unknown_ samples using synthetic background speech / noise combinations
+        # 2. Inject _unknown_ samples using synthetic background noise combinations
         num_unknown = int(len(self.raw_dataset) * 0.05)
         for _ in range(num_unknown):
-            # Synthetic low-energy OOV speech substitute (gaussian noise + filtered structure)
             noise_waveform = torch.randn(1, TARGET_SAMPLES) * 0.02
-            self.samples.append((noise_waveform, SAMPLE_RATE, "_unknown_"))
+            self.extra_samples.append((noise_waveform, SAMPLE_RATE, "_unknown_"))
+
+    def _get_raw_sample(self, idx: int):
+        """Fetches raw audio dynamically on demand to avoid RAM saturation."""
+        if idx < self.num_raw:
+            waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
+            return waveform, sample_rate, label
+        else:
+            return self.extra_samples[idx - self.num_raw]
 
     def _process_sample(self, idx: int):
-        waveform, sample_rate, label = self.samples[idx]
+        waveform, sample_rate, label = self._get_raw_sample(idx)
         waveform = prepare_waveform(waveform, sample_rate)
 
         with torch.no_grad():
@@ -130,7 +137,7 @@ class SpeechCommandsDataset(Dataset):
         return features, target
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return self.num_total
 
     def __getitem__(self, idx: int):
         if self.cache_in_ram:
