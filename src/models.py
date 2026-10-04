@@ -64,14 +64,6 @@ class ResidualBlock(nn.Module):
 
 
 class CommandSense(nn.Module):
-    """Residual CNN for CommandSense v2.0 (3-channel input).
-
-    Identical to the v1.0.0 network except for the input channel count, so that
-    the v1.0.0 -> v2.0.0 comparison isolates the feature representation.
-    Input  : [Batch, 3, N_MELS (64), FRAMES (63)]
-    Output : logits [Batch, num_classes]
-    """
-
     def __init__(self, num_classes=NUM_CLASSES, in_channels=3):
         super().__init__()
 

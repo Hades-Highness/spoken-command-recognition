@@ -1,13 +1,3 @@
-"""Evaluate a checkpoint on the official Speech Commands test split.
-
-Writes into the versioned reports folder:
-
-    reports/model_v2.0/report_v2.0.txt
-    reports/model_v2.0/confusion_matrix_v2.0.png
-
-Run with:  python evaluate.py
-"""
-
 import json
 import os
 import sys

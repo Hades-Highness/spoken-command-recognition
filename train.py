@@ -1,13 +1,3 @@
-"""Training pipeline for CommandSense.
-
-Writes everything into the versioned folder for the current MODEL_VERSION:
-
-    checkpoints/model_v2.0/CommandSense_v2.0.pth
-    reports/model_v2.0/history_v2.0.json
-    reports/model_v2.0/training_curves_v2.0.png
-    configs/labels.json                        (index -> class name mapping)
-"""
-
 import json
 import os
 import random
