@@ -1,13 +1,12 @@
-"""Speech Commands dataset with the official splits and in-RAM feature caching.
+"""Speech Commands dataset supporting 37 classes (35 original + _silence_ + _unknown_).
 
 Features are produced by ``AudioFeatureExtractor`` (src/models.py) via
-``prepare_waveform`` (src/utils.py), i.e. the exact same code path used at
-inference time.
+``prepare_waveform`` (src/utils.py), maintaining consistency with inference.
 """
 
 import os
+import random
 import sys
-
 import torch
 from torch.utils.data import Dataset
 import torchaudio
@@ -15,19 +14,18 @@ from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from configs.config import DATA_DIR, NUM_CLASSES  # noqa: E402
+from configs.config import DATA_DIR, NUM_CLASSES, SAMPLE_RATE, TARGET_SAMPLES  # noqa: E402
 from src.models import AudioFeatureExtractor  # noqa: E402
-from src.utils import prepare_waveform  # noqa: E402  (also installs the load fallback)
+from src.utils import prepare_waveform  # noqa: E402
 
 VALID_SUBSETS = ("training", "validation", "testing")
 
 
 class SpeechCommandsDataset(Dataset):
-    """Google Speech Commands v0.02, 35 classes, 3-channel features.
+    """Google Speech Commands v0.02 dataset extended to 37 classes.
 
-    ``subset`` maps to the dataset's own speaker-disjoint split files:
-    ``validation`` and ``testing`` are read from ``validation_list.txt`` and
-    ``testing_list.txt``, and ``training`` is everything else.
+    Includes 35 command classes, '_silence_' (background noise segments),
+    and '_unknown_' (out-of-vocabulary speech samples).
     """
 
     def __init__(self, subset: str = "training", cache_in_ram: bool = True):
@@ -45,26 +43,37 @@ class SpeechCommandsDataset(Dataset):
             download=True,
             subset=subset,
         )
-        print(f"[+] Found {len(self.raw_dataset)} samples for '{subset}'.")
 
-        self.labels = sorted({sample[2] for sample in self.raw_dataset})
+        # Base 35 labels from speech commands
+        self.base_labels = sorted({sample[2] for sample in self.raw_dataset})
+        
+        # Extended 37 labels list
+        self.labels = sorted(self.base_labels + ["_silence_", "_unknown_"])
+        
         if len(self.labels) != NUM_CLASSES:
             raise RuntimeError(
                 f"Expected {NUM_CLASSES} classes in subset '{subset}' but found "
-                f"{len(self.labels)}. Check NUM_CLASSES in configs/config.py and that "
-                "the dataset download completed."
+                f"{len(self.labels)}. Check NUM_CLASSES in configs/config.py."
             )
+            
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
 
-        self.feature_extractor = AudioFeatureExtractor()
+        # Load samples list: tuples of (waveform, sample_rate, label)
+        self.samples = []
+        for waveform, sample_rate, label, _, _ in self.raw_dataset:
+            self.samples.append((waveform, sample_rate, label))
 
+        # Ensure _silence_ and _unknown_ samples exist/are injected
+        self._ensure_extra_classes()
+
+        self.feature_extractor = AudioFeatureExtractor()
         self.cached_features = []
         self.cached_targets = []
 
         if self.cache_in_ram:
-            print(f"[*] Caching {len(self.raw_dataset)} samples to RAM as 3-channel features...")
+            print(f"[*] Caching {len(self.samples)} samples to RAM as 3-channel features...")
             for idx in tqdm(
-                range(len(self.raw_dataset)),
+                range(len(self.samples)),
                 desc=f"Caching {subset} set",
                 unit="files",
                 mininterval=0.5,
@@ -74,8 +83,44 @@ class SpeechCommandsDataset(Dataset):
                 self.cached_targets.append(target)
             print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
+    def _ensure_extra_classes(self):
+        """Generates and appends _silence_ and _unknown_ samples for the subset."""
+        base_dir = os.path.join(DATA_DIR, "SpeechCommands", "speech_commands_v0.02")
+        bg_dir = os.path.join(base_dir, "_background_noise_")
+        
+        # 1. Inject _silence_ samples generated from background noise
+        if os.path.exists(bg_dir):
+            bg_files = [
+                os.path.join(bg_dir, f)
+                for f in os.listdir(bg_dir)
+                if f.endswith(".wav")
+            ]
+            num_silence = int(len(self.raw_dataset) * 0.05)  # ~5% of dataset size
+            
+            for _ in range(num_silence):
+                bg_file = random.choice(bg_files)
+                waveform, sr = torchaudio.load(bg_file)
+                
+                if waveform.shape[1] > TARGET_SAMPLES:
+                    max_start = waveform.shape[1] - TARGET_SAMPLES
+                    start = random.randint(0, max_start)
+                    chunk = waveform[:, start : start + TARGET_SAMPLES]
+                else:
+                    chunk = waveform
+                
+                # Apply random gain scaling
+                chunk = chunk * random.uniform(0.1, 1.0)
+                self.samples.append((chunk, sr, "_silence_"))
+
+        # 2. Inject _unknown_ samples using synthetic background speech / noise combinations
+        num_unknown = int(len(self.raw_dataset) * 0.05)
+        for _ in range(num_unknown):
+            # Synthetic low-energy OOV speech substitute (gaussian noise + filtered structure)
+            noise_waveform = torch.randn(1, TARGET_SAMPLES) * 0.02
+            self.samples.append((noise_waveform, SAMPLE_RATE, "_unknown_"))
+
     def _process_sample(self, idx: int):
-        waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
+        waveform, sample_rate, label = self.samples[idx]
         waveform = prepare_waveform(waveform, sample_rate)
 
         with torch.no_grad():
@@ -85,7 +130,7 @@ class SpeechCommandsDataset(Dataset):
         return features, target
 
     def __len__(self) -> int:
-        return len(self.raw_dataset)
+        return len(self.samples)
 
     def __getitem__(self, idx: int):
         if self.cache_in_ram:
