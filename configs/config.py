@@ -43,8 +43,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Model & versioning
 # ---------------------------------------------------------------------------
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v2.0"
-NUM_CLASSES = 35
+MODEL_VERSION = "v2.1"
+NUM_CLASSES = 37
 
 
 def checkpoint_dir(version: str = MODEL_VERSION) -> Path:

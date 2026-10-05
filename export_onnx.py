@@ -17,7 +17,6 @@ def export_to_onnx():
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    # Input tensor shape for v2.0.0: [Batch=1, Channels=3, Mel_Bins=64, Time_Frames=63]
     dummy_input = torch.randn(1, 3, 64, 63, device=device)
 
     torch.onnx.export(
@@ -36,11 +35,9 @@ def export_to_onnx():
     )
     print(f"[+] ONNX model successfully exported -> {onnx_path}")
 
-    # v2.0.0 Guard-rail: Strict shape validation on exported ONNX model
     verify_onnx_model(onnx_path)
 
 def verify_onnx_model(onnx_path: str):
-    """Verify ONNX model structure and input tensor channels (v2.0.0 guard-rail)."""
     onnx_model = onnx.load(onnx_path)
     onnx.checker.check_model(onnx_model)
     
@@ -49,7 +46,7 @@ def verify_onnx_model(onnx_path: str):
     
     # Check input channels shape: [batch_size, 3, 64, 63]
     num_channels = shape[1]
-    assert num_channels == 3, f"[!] Export Error: Expected 3 input channels for v2.0.0, got {num_channels}"
+    assert num_channels == 3, f"[!] Export Error: Expected 3 input channels, got {num_channels}"
     
     print(f"[+] ONNX Strict Shape Verification Passed: declared_shape[1] == {num_channels}")
 

@@ -1,13 +1,7 @@
-"""Speech Commands dataset with the official splits and in-RAM feature caching.
-
-Features are produced by ``AudioFeatureExtractor`` (src/models.py) via
-``prepare_waveform`` (src/utils.py), i.e. the exact same code path used at
-inference time.
-"""
-
+import gc
 import os
+import random
 import sys
-
 import torch
 from torch.utils.data import Dataset
 import torchaudio
@@ -15,19 +9,18 @@ from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from configs.config import DATA_DIR, NUM_CLASSES  # noqa: E402
+from configs.config import DATA_DIR, NUM_CLASSES, SAMPLE_RATE, TARGET_SAMPLES  # noqa: E402
 from src.models import AudioFeatureExtractor  # noqa: E402
-from src.utils import prepare_waveform  # noqa: E402  (also installs the load fallback)
+from src.utils import prepare_waveform  # noqa: E402
 
 VALID_SUBSETS = ("training", "validation", "testing")
 
 
 class SpeechCommandsDataset(Dataset):
-    """Google Speech Commands v0.02, 35 classes, 3-channel features.
+    """Google Speech Commands v0.02 dataset extended to 37 classes.
 
-    ``subset`` maps to the dataset's own speaker-disjoint split files:
-    ``validation`` and ``testing`` are read from ``validation_list.txt`` and
-    ``testing_list.txt``, and ``training`` is everything else.
+    Includes 35 command classes, '_silence_' (background noise segments),
+    and '_unknown_' (out-of-vocabulary speech samples from LibriSpeech).
     """
 
     def __init__(self, subset: str = "training", cache_in_ram: bool = True):
@@ -45,26 +38,36 @@ class SpeechCommandsDataset(Dataset):
             download=True,
             subset=subset,
         )
-        print(f"[+] Found {len(self.raw_dataset)} samples for '{subset}'.")
 
-        self.labels = sorted({sample[2] for sample in self.raw_dataset})
+        # Base 35 labels from speech commands
+        self.base_labels = sorted({sample[2] for sample in self.raw_dataset})
+        
+        # Extended 37 labels list
+        self.labels = sorted(self.base_labels + ["_silence_", "_unknown_"])
+        
         if len(self.labels) != NUM_CLASSES:
             raise RuntimeError(
                 f"Expected {NUM_CLASSES} classes in subset '{subset}' but found "
-                f"{len(self.labels)}. Check NUM_CLASSES in configs/config.py and that "
-                "the dataset download completed."
+                f"{len(self.labels)}. Check NUM_CLASSES in configs/config.py."
             )
+            
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
 
-        self.feature_extractor = AudioFeatureExtractor()
+        # Extra samples buffer for _silence_ and _unknown_ classes only
+        self.extra_samples = []
+        self._generate_extra_samples()
 
+        self.num_raw = len(self.raw_dataset)
+        self.num_total = self.num_raw + len(self.extra_samples)
+
+        self.feature_extractor = AudioFeatureExtractor()
         self.cached_features = []
         self.cached_targets = []
 
         if self.cache_in_ram:
-            print(f"[*] Caching {len(self.raw_dataset)} samples to RAM as 3-channel features...")
+            print(f"[*] Caching {self.num_total} samples to RAM as 3-channel features...")
             for idx in tqdm(
-                range(len(self.raw_dataset)),
+                range(self.num_total),
                 desc=f"Caching {subset} set",
                 unit="files",
                 mininterval=0.5,
@@ -72,10 +75,111 @@ class SpeechCommandsDataset(Dataset):
                 feature, target = self._process_sample(idx)
                 self.cached_features.append(feature)
                 self.cached_targets.append(target)
+
+            # Instantly release extra raw waveforms from RAM after feature extraction
+            del self.extra_samples
+            self.extra_samples = []
+            gc.collect()
+
             print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
+    def _generate_extra_samples(self):
+        """Generates _silence_ and _unknown_ samples using real audio sources."""
+        base_dir = os.path.join(DATA_DIR, "SpeechCommands", "speech_commands_v0.02")
+        bg_dir = os.path.join(base_dir, "_background_noise_")
+        
+        num_extra_target = int(len(self.raw_dataset) * 0.05)  # ~5% of split size
+
+        # 1. Inject _silence_ samples (split noise sources to prevent train/test leakage)
+        if not os.path.exists(bg_dir):
+            raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
+
+        bg_files = sorted([
+            os.path.join(bg_dir, f)
+            for f in os.listdir(bg_dir)
+            if f.endswith(".wav")
+        ])
+
+        if len(bg_files) < 5:
+            raise RuntimeError(
+                f"Expected at least 5 background noise files in {bg_dir}, found {len(bg_files)}."
+            )
+
+        # Partition background noise files: 4 files for training, remaining for val/test
+        if self.subset == "training":
+            selected_bg = bg_files[:4]
+        else:
+            selected_bg = bg_files[4:]
+
+        silence_count = 0
+        for _ in range(num_extra_target):
+            bg_file = random.choice(selected_bg)
+            waveform, sr = torchaudio.load(bg_file)
+            
+            if waveform.shape[1] > TARGET_SAMPLES:
+                max_start = waveform.shape[1] - TARGET_SAMPLES
+                start = random.randint(0, max_start)
+                chunk = waveform[:, start : start + TARGET_SAMPLES]
+            else:
+                chunk = waveform
+            
+            chunk = chunk * random.uniform(0.1, 1.0)
+            self.extra_samples.append((chunk, sr, "_silence_"))
+            silence_count += 1
+
+        # 2. Inject _unknown_ samples from LibriSpeech (real OOV speech)
+        ls_url = "dev-clean" if self.subset in ("validation", "testing") else "train-clean-100"
+        try:
+            librispeech_ds = torchaudio.datasets.LIBRISPEECH(
+                root=str(DATA_DIR),
+                url=ls_url,
+                download=True,
+            )
+            
+            indices = list(range(len(librispeech_ds)))
+            random.shuffle(indices)
+            
+            unknown_count = 0
+            for idx in indices:
+                if unknown_count >= num_extra_target:
+                    break
+                waveform, sr, _, _, _, _ = librispeech_ds[idx]
+                
+                # Crop 1-second segment from speech file
+                if waveform.shape[1] >= TARGET_SAMPLES:
+                    max_start = waveform.shape[1] - TARGET_SAMPLES
+                    start = random.randint(0, max_start)
+                    chunk = waveform[:, start : start + TARGET_SAMPLES]
+                else:
+                    chunk = torch.nn.functional.pad(
+                        waveform, (0, TARGET_SAMPLES - waveform.shape[1])
+                    )
+                
+                self.extra_samples.append((chunk, sr, "_unknown_"))
+                unknown_count += 1
+
+        except Exception as e:
+            raise RuntimeError(
+                f"_unknown_ samples require LibriSpeech ({ls_url}) but loading failed: {e}. "
+                "Refusing to fall back to synthetic noise, which would silently make the "
+                "rejection class meaningless."
+            ) from e
+
+        print(
+            f"[+] Extra samples generated for split '{self.subset}': "
+            f"_silence_={silence_count}, _unknown_={unknown_count}"
+        )
+
+    def _get_raw_sample(self, idx: int):
+        """Fetches raw audio dynamically on demand to avoid RAM saturation."""
+        if idx < self.num_raw:
+            waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
+            return waveform, sample_rate, label
+        else:
+            return self.extra_samples[idx - self.num_raw]
+
     def _process_sample(self, idx: int):
-        waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
+        waveform, sample_rate, label = self._get_raw_sample(idx)
         waveform = prepare_waveform(waveform, sample_rate)
 
         with torch.no_grad():
@@ -85,7 +189,7 @@ class SpeechCommandsDataset(Dataset):
         return features, target
 
     def __len__(self) -> int:
-        return len(self.raw_dataset)
+        return self.num_total
 
     def __getitem__(self, idx: int):
         if self.cache_in_ram:
