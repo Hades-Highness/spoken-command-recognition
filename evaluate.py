@@ -3,10 +3,12 @@ import os
 import sys
 
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
+from train import set_seed
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -18,6 +20,7 @@ from configs.config import (  # noqa: E402
     MODEL_VERSION,
     NUM_CLASSES,
     NUM_WORKERS,
+    SEED,
     checkpoint_dir,
     reports_dir,
 )
@@ -38,6 +41,7 @@ def resolve_checkpoint(version=MODEL_VERSION):
 
 
 def main():
+    set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[*] Hardware device: {device}")
 
@@ -81,10 +85,49 @@ def main():
             all_preds.extend(preds)
             all_targets.extend(targets.numpy())
 
-    accuracy = (sum(p == t for p, t in zip(all_preds, all_targets)) / len(all_targets)) * 100
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
+
+    # --- Metrics Computation ---
+    overall_accuracy = (np.sum(all_preds == all_targets) / len(all_targets)) * 100
+
+    # Separate core 35 commands and rejection classes
+    rejection_classes = {"_silence_", "_unknown_"}
+    cmd_indices = [
+        idx for idx, label in enumerate(class_names) if label not in rejection_classes
+    ]
+
+    cmd_mask = np.isin(all_targets, cmd_indices)
+    cmd_targets = all_targets[cmd_mask]
+    cmd_preds = all_preds[cmd_mask]
+    cmd_accuracy = (np.sum(cmd_preds == cmd_targets) / len(cmd_targets)) * 100 if len(cmd_targets) > 0 else 0.0
+
+    # Recall for rejection classes
+    rejection_recalls = {}
+    for rej_label in rejection_classes:
+        if rej_label in class_names:
+            rej_idx = class_names.index(rej_label)
+            rej_mask = (all_targets == rej_idx)
+            if np.sum(rej_mask) > 0:
+                rec = (np.sum(all_preds[rej_mask] == rej_idx) / np.sum(rej_mask)) * 100
+                rejection_recalls[rej_label] = (rec, int(np.sum(all_preds[rej_mask] == rej_idx)), int(np.sum(rej_mask)))
+            else:
+                rejection_recalls[rej_label] = (0.0, 0, 0)
+
     report = classification_report(all_targets, all_preds, target_names=class_names, digits=4)
 
-    print(f"\n--- CLASSIFICATION REPORT ({MODEL_NAME} {MODEL_VERSION}) ---")
+    # Print summary block to console
+    print("\n" + "=" * 60)
+    print(f"       EVALUATION REPORT ({MODEL_NAME} {MODEL_VERSION})       ")
+    print("=" * 60)
+    print(f"Overall Accuracy (37 classes): {overall_accuracy:.2f}% ({np.sum(all_preds == all_targets)}/{len(all_targets)})")
+    print("-" * 60)
+    print(f"35 Command Words Top-1 Acc:    {cmd_accuracy:.2f}% ({np.sum(cmd_preds == cmd_targets)}/{len(cmd_targets)})")
+    for rej_label, (rec, corr, tot) in rejection_recalls.items():
+        print(f"Rejection Recall '{rej_label}':    {rec:.2f}% ({corr}/{tot})")
+    print("=" * 60 + "\n")
+
+    print(f"--- DETAILED CLASSIFICATION REPORT ---")
     print(report)
 
     out_dir = reports_dir(MODEL_VERSION)
@@ -92,12 +135,21 @@ def main():
 
     report_path = os.path.join(out_dir, f"report_{MODEL_VERSION}.txt")
     with open(report_path, "w", encoding="utf-8") as handle:
-        handle.write(f"--- CLASSIFICATION REPORT ({MODEL_NAME} {MODEL_VERSION}) ---\n")
+        handle.write("=======================================================\n")
+        handle.write(f"       EVALUATION REPORT ({MODEL_NAME} {MODEL_VERSION})       \n")
+        handle.write("=======================================================\n\n")
         handle.write(f"Checkpoint: {checkpoint_path}\n")
-        handle.write(f"Samples: {len(all_targets)}  Accuracy: {accuracy:.4f}%\n\n")
+        handle.write(f"Total Samples: {len(all_targets)}\n")
+        handle.write(f"Overall Accuracy: {overall_accuracy:.4f}%\n\n")
+        handle.write("--- SEPARATED METRICS ---\n")
+        handle.write(f"Top-1 Accuracy (35 Commands): {cmd_accuracy:.4f}% ({np.sum(cmd_preds == cmd_targets)}/{len(cmd_targets)})\n")
+        for rej_label, (rec, corr, tot) in rejection_recalls.items():
+            handle.write(f"Recall '{rej_label}':               {rec:.4f}% ({corr}/{tot})\n")
+        handle.write("\n--- DETAILED CLASSIFICATION REPORT ---\n")
         handle.write(report)
     print(f"[+] Saved {report_path}")
 
+    # Plot Confusion Matrix
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(18, 14), facecolor="#0d1117")
     ax.set_facecolor("#0d1117")
@@ -117,7 +169,6 @@ def main():
     plt.savefig(matrix_path, dpi=300, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close()
     print(f"[+] Saved {matrix_path}")
-    print(f"[+] Test accuracy: {accuracy:.2f}% on {len(all_targets)} clips")
 
 
 if __name__ == "__main__":
