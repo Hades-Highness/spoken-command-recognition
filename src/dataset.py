@@ -91,35 +91,41 @@ class SpeechCommandsDataset(Dataset):
         num_extra_target = int(len(self.raw_dataset) * 0.05)  # ~5% of split size
 
         # 1. Inject _silence_ samples (split noise sources to prevent train/test leakage)
-        if os.path.exists(bg_dir):
-            bg_files = sorted([
-                os.path.join(bg_dir, f)
-                for f in os.listdir(bg_dir)
-                if f.endswith(".wav")
-            ])
-            
-            # Partition background noise files between splits
-            if self.subset == "training":
-                selected_bg = bg_files[:4]
-            else:
-                selected_bg = bg_files[4:]
-                
-            if selected_bg:
-                for _ in range(num_extra_target):
-                    bg_file = random.choice(selected_bg)
-                    waveform, sr = torchaudio.load(bg_file)
-                    
-                    if waveform.shape[1] > TARGET_SAMPLES:
-                        max_start = waveform.shape[1] - TARGET_SAMPLES
-                        start = random.randint(0, max_start)
-                        chunk = waveform[:, start : start + TARGET_SAMPLES]
-                    else:
-                        chunk = waveform
-                    
-                    chunk = chunk * random.uniform(0.1, 1.0)
-                    self.extra_samples.append((chunk, sr, "_silence_"))
+        if not os.path.exists(bg_dir):
+            raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
+
+        bg_files = sorted([
+            os.path.join(bg_dir, f)
+            for f in os.listdir(bg_dir)
+            if f.endswith(".wav")
+        ])
+
+        if len(bg_files) < 5:
+            raise RuntimeError(
+                f"Expected at least 5 background noise files in {bg_dir}, found {len(bg_files)}."
+            )
+
+        # Partition background noise files: 4 files for training, remaining for val/test
+        if self.subset == "training":
+            selected_bg = bg_files[:4]
         else:
-            print(f"[!] Warning: Background noise directory {bg_dir} not found.")
+            selected_bg = bg_files[4:]
+
+        silence_count = 0
+        for _ in range(num_extra_target):
+            bg_file = random.choice(selected_bg)
+            waveform, sr = torchaudio.load(bg_file)
+            
+            if waveform.shape[1] > TARGET_SAMPLES:
+                max_start = waveform.shape[1] - TARGET_SAMPLES
+                start = random.randint(0, max_start)
+                chunk = waveform[:, start : start + TARGET_SAMPLES]
+            else:
+                chunk = waveform
+            
+            chunk = chunk * random.uniform(0.1, 1.0)
+            self.extra_samples.append((chunk, sr, "_silence_"))
+            silence_count += 1
 
         # 2. Inject _unknown_ samples from LibriSpeech (real OOV speech)
         ls_url = "dev-clean" if self.subset in ("validation", "testing") else "train-clean-100"
@@ -133,9 +139,9 @@ class SpeechCommandsDataset(Dataset):
             indices = list(range(len(librispeech_ds)))
             random.shuffle(indices)
             
-            collected = 0
+            unknown_count = 0
             for idx in indices:
-                if collected >= num_extra_target:
+                if unknown_count >= num_extra_target:
                     break
                 waveform, sr, _, _, _, _ = librispeech_ds[idx]
                 
@@ -150,13 +156,19 @@ class SpeechCommandsDataset(Dataset):
                     )
                 
                 self.extra_samples.append((chunk, sr, "_unknown_"))
-                collected += 1
+                unknown_count += 1
 
         except Exception as e:
-            print(f"[!] Warning: Failed to load LibriSpeech dataset ({e}). Falling back to noise mix.")
-            for _ in range(num_extra_target):
-                noise = torch.randn(1, TARGET_SAMPLES) * 0.02
-                self.extra_samples.append((noise, SAMPLE_RATE, "_unknown_"))
+            raise RuntimeError(
+                f"_unknown_ samples require LibriSpeech ({ls_url}) but loading failed: {e}. "
+                "Refusing to fall back to synthetic noise, which would silently make the "
+                "rejection class meaningless."
+            ) from e
+
+        print(
+            f"[+] Extra samples generated for split '{self.subset}': "
+            f"_silence_={silence_count}, _unknown_={unknown_count}"
+        )
 
     def _get_raw_sample(self, idx: int):
         """Fetches raw audio dynamically on demand to avoid RAM saturation."""

@@ -1,9 +1,6 @@
---- CLASSIFICATION REPORT (CommandSense v1.0, 1-channel) ---
-Produced by scripts/evaluate_v1_legacy.py (archived v1.0.0 pipeline)
+--- CLASSIFICATION REPORT (CommandSense v1.0) ---
 Checkpoint: C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v1.0\CommandSense_v1.0.pth
-Parameters: 1,216,259
 Samples: 11005  Accuracy: 94.4571%
-Correct: 10395/11005
 
               precision    recall  f1-score   support
 
