@@ -1,4 +1,7 @@
 --- CLASSIFICATION REPORT (CommandSense v2.0) ---
+Checkpoint: C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v2.0\CommandSense_v2.0.pth
+Samples: 11005  Accuracy: 94.7842%
+
               precision    recall  f1-score   support
 
     backward     0.9810    0.9394    0.9598       165

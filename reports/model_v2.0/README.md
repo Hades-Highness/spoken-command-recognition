@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Model%20Version-v2.0.0-7c3aed?style=for-the-badge" alt="Model Version">
   <img src="https://img.shields.io/badge/Val%20Accuracy-94.77%25-green?style=for-the-badge" alt="Validation Accuracy">
   <img src="https://img.shields.io/badge/Test%20Accuracy-94.78%25-green?style=for-the-badge" alt="Test Accuracy">
-  <img src="https://img.shields.io/badge/Classes-35%20Keywords-blue?style=for-the-badge" alt="35 Classes">
+  <img src="https://img.shields.io/badge/Classes-35-blue?style=for-the-badge" alt="35 Classes">
 </p>
 
 ---
