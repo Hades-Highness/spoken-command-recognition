@@ -48,10 +48,8 @@ NUM_CLASSES = 37
 
 
 def checkpoint_dir(version: str = MODEL_VERSION) -> Path:
-    """Versioned checkpoint folder, e.g. checkpoints/model_v2.0/."""
     return CHECKPOINT_DIR / f"model_{version.lower()}"
 
 
 def reports_dir(version: str = MODEL_VERSION) -> Path:
-    """Versioned reports folder, e.g. reports/model_v2.0/."""
     return REPORTS_DIR / f"model_{version.lower()}"

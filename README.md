@@ -53,7 +53,7 @@ Every version is trained with the same recipe (residual CNN, AdamW at `1e-3`, we
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | **v1.0** | Baseline: single-channel Log-Mel front-end | 1,216,259 | 94.66% | 94.4571% | 0.9406 | — | 94.4571% | — | [v1.0 card](reports/model_v1.0/README.md) |
 | **v2.0** | Three-channel front-end: Log-Mel + $\Delta$ + $\Delta^2$ | 1,216,835 | 94.77% | 94.7842% | 0.9436 | — | 94.7842% | +0.3271 | [v2.0 card](reports/model_v2.0/README.md) |
-| **v2.1** | Rejection classes: `_silence_` (background noise) + `_unknown_` (LibriSpeech OOV speech) | 1,217,349 | 94.96% † | **94.1481%** | **0.9363** | `_silence_` 97.82%<br>`_unknown_` 98.36% | 94.5064% | **−0.6361** | [v2.1 card](reports/model_v2.1/README.md) |
+| **v2.1** | Rejection classes: `_silence_` (background noise) + `_unknown_` (LibriSpeech OOV speech) | 1,217,349 | 94.96%  | **94.1481%** | **0.9363** | `_silence_` 97.82%<br>`_unknown_` 98.36% | 94.5064% | **−0.6361** | [v2.1 card](reports/model_v2.1/README.md) |
 
 † The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
 

@@ -26,6 +26,7 @@ def export_to_onnx():
         export_params=True,
         opset_version=17,
         do_constant_folding=True,
+        external_data=False,
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={
@@ -33,13 +34,27 @@ def export_to_onnx():
             "output": {0: "batch_size"}
         }
     )
-    print(f"[+] ONNX model successfully exported -> {onnx_path}")
-
     verify_onnx_model(onnx_path)
 
+    external_data_path = f"{onnx_path}.data"
+    if os.path.exists(external_data_path):
+        os.remove(external_data_path)
+
+    print(f"[+] ONNX model successfully exported -> {onnx_path}")
+
 def verify_onnx_model(onnx_path: str):
-    onnx_model = onnx.load(onnx_path)
+    onnx_model = onnx.load(onnx_path, load_external_data=False)
     onnx.checker.check_model(onnx_model)
+
+    external_initializers = [
+        initializer.name
+        for initializer in onnx_model.graph.initializer
+        if initializer.data_location == onnx.TensorProto.EXTERNAL
+        or initializer.external_data
+    ]
+    assert not external_initializers, (
+        f"[!] Export Error: Model contains external tensor data: {external_initializers}"
+    )
     
     input_tensor = onnx_model.graph.input[0]
     shape = [dim.dim_value for dim in input_tensor.type.tensor_type.shape.dim]
