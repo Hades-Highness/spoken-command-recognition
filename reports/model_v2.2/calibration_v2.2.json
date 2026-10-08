@@ -1,0 +1,19 @@
+{
+    "model_name": "CommandSense",
+    "model_version": "v2.2",
+    "created_utc": "2026-10-08T09:30:19Z",
+    "temperature": 1.807422,
+    "confidence_threshold": 0.8,
+    "reject_label": "_unknown_",
+    "n_bins": 15,
+    "ece_before": 0.025993,
+    "ece_after": 0.007664,
+    "nll_before": 0.239402,
+    "nll_after": 0.195932,
+    "nll_before_train": null,
+    "threshold_criterion": "min_cost",
+    "calibration_split": "validation (10979 samples)",
+    "calibration_samples": 10979,
+    "source_checkpoint": "C:\\Users\\Administrator\\Documents\\Models\\spoken-command-recognition\\checkpoints\\model_v2.1\\CommandSense_v2.1.pth",
+    "notes": "Post-hoc temperature scaling and confidence thresholding. The logits stay raw in the exported ONNX graph: T and tau are applied by the Python runtime so that the threshold can be changed without re-export."
+}
