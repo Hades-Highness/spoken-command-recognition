@@ -20,7 +20,7 @@ An end-to-end deep learning pipeline for spoken keyword spotting and audio comma
 
 ## - Note on Model Versions & Source Code
 
-The current repository source code and the interactive web interface **(`app.py`)** are optimized **exclusively** for **CommandSense v2.1** (35 command words plus `_silence_` and `_unknown_`, 37 output classes, 3-channel 16 kHz spectrograms).
+The current repository source code and the interactive web interface **(`app.py`)** are optimized **exclusively** for the **CommandSense v2.x** family: **v2.1** (35 command words plus `_silence_` and `_unknown_`, 37 output classes, 3-channel 16 kHz spectrograms) and its calibration release **v2.2**, which reuses the v2.1 weights byte-for-byte and adds nothing but a fitted temperature `T` and a confidence threshold `tau` on top of them. A single v2.1 checkpoint therefore reproduces every number published in this repository.
 
 Model artifacts **(`.pth` and `.onnx`)** for official releases are available in the **GitHub Releases** section to keep the source repository lightweight and version-controlled. Older checkpoints remain downloadable from their own releases, and their results stay in the repository under `reports/model_v<version>/`.
 
@@ -54,8 +54,11 @@ Every version is trained with the same recipe (residual CNN, AdamW at `1e-3`, we
 | **v1.0** | Baseline: single-channel Log-Mel front-end | 1,216,259 | 94.66% | 94.4571% | 0.9406 | — | 94.4571% | — | [v1.0 card](reports/model_v1.0/README.md) |
 | **v2.0** | Three-channel front-end: Log-Mel + $\Delta$ + $\Delta^2$ | 1,216,835 | 94.77% | 94.7842% | 0.9436 | — | 94.7842% | +0.3271 | [v2.0 card](reports/model_v2.0/README.md) |
 | **v2.1** | Rejection classes: `_silence_` (background noise) + `_unknown_` (LibriSpeech OOV speech) | 1,217,349 | 94.96%  | **94.1481%** | **0.9363** | `_silence_` 97.82%<br>`_unknown_` 98.36% | 94.5064% | **−0.6361** | [v2.1 card](reports/model_v2.1/README.md) |
+| **v2.2** | Calibration release: temperature scaling + confidence threshold, **no new weights** | 1,217,349 | 94.94% | **94.1481%** | 0.9364 | `_silence_` 98.36%<br>`_unknown_` 99.09% | 94.5642% | **0.0000** ‡ | [v2.2 card](reports/model_v2.2/README.md) |
 
 † The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
+
+‡ v2.2 takes **no gradient step at all**: `Δ Test` is zero by construction, not by measurement, because temperature scaling cannot change an argmax. All 11,005 command clips are classified exactly as in the v2.1 pass — the per-class recall of every one of the 35 commands is identical row-for-row in the two reports — so every accuracy cell on the command task is a copy of the v2.1 cell. Only the columns that mix in the redrawn rejection clips move — `Test Macro F1` (0.9363 → 0.9364, through precision), `Overall` (94.5064 % → 94.5642 %) and `Rejection recall` — and they move only because `src/dataset.py` slices the 1,100 synthetic `_silence_` / `_unknown_` clips out of the held-out recordings at load time instead of storing them on disk. Treat the v2.2 row as a *calibration and rejection* result, not an accuracy result.
 
 ### - How to read the progression
 
@@ -65,6 +68,7 @@ Every version is trained with the same recipe (residual CNN, AdamW at `1e-3`, we
 * **A `Δ Test` below ~0.4 points is not resolvable.** The standard error on a single accuracy estimate at this level is ≈0.21 points; differences smaller than that should not be read as improvements or regressions.
 * **Per-version detail lives in the model cards, not here.** Each card carries its own epoch-by-epoch history, full per-class table, confusion matrix and caveats, and each card is written to stand alone — cards are not compared against each other.
 * **Watch the `Params` column.** Parameters are capacity. A version that changes both the architecture and the front-end at once is not a single-variable experiment.
+* **v2.2 is the one row that cannot move.** It changes how the model's *confidence* is reported, not what the model computes, so its accuracy cells are copies of the v2.1 cells by construction. Read it for the calibration error and the confidence-threshold behaviour, which the other rows do not have at all.
 
 ---
 
@@ -82,7 +86,7 @@ All versions share the same residual network; only the first convolution and the
 | Pooling | `AdaptiveAvgPool2d((1, 1))` | `[B, 256, 1, 1]` |
 | Head | Flatten → `Dropout(0.3)` → `Linear(256→N)` | `[B, N]` |
 
-Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×1 projection shortcut where the shape changes. `N` is 35 for v1.0 and v2.0, and 37 for v2.1.
+Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×1 projection shortcut where the shape changes. `N` is 35 for v1.0 and v2.0, and 37 for v2.1 and v2.2 — v2.2 introduces no layer, no parameter and no change to the graph.
 
 ---
 
@@ -91,9 +95,11 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 ```text
 .
 ├── checkpoints/                  # Model weight releases (git-ignored; created at runtime)
-│   └── model_v2.1/               # CommandSense_v2.1.pth, CommandSense_v2.1.onnx
+│   ├── model_v2.1/               # CommandSense_v2.1.pth, CommandSense_v2.1.onnx
+│   └── model_v2.2/               # v2.2 weights: CommandSense_v2.2.pth + CommandSense_v2.2.onnx
 ├── configs/                      # Global hyperparameters, paths and the class mapping
-│   ├── config.py
+│   ├── calibration/              # Calibration payload: CommandSense_calibration_v2.2.json (T and tau)
+│   ├── config.py                 # Training, audio and calibration settings
 │   └── labels.json               # Index -> class name mapping (37 entries for v2.1)
 ├── data/                         # Raw datasets (git-ignored, auto-downloaded)
 │   ├── SpeechCommands/           # Google Speech Commands v0.02
@@ -101,14 +107,16 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 ├── reports/                      # Versioned evaluation cards, histories, reports and plots
 │   ├── model_v1.0/
 │   ├── model_v2.0/
-│   └── model_v2.1/
+│   ├── model_v2.1/
+│   └── model_v2.2/               # Calibration report, JSON/PNG artifacts and reliability plot
 ├── src/                          # Source code modules
+│   ├── calibration.py            # Temperature scaling, ECE / reliability, tau sweep (v2.2)
 │   ├── dataset.py                # Speech Commands + rejection-class construction
-│   ├── inference.py              # Dual-backend (ONNX & PyTorch) inferencer
+│   ├── inference.py              # Dual-backend (ONNX & PyTorch) inferencer applying T and tau
 │   ├── models.py                 # AudioFeatureExtractor + ResidualBlock + CommandSense
 │   └── utils.py                  # Audio loading and preprocessing (single source of truth)
-├── app.py                        # Interactive Gradio Web UI
-├── evaluate.py                   # Separated metrics + classification report + confusion matrix
+├── app.py                        # Interactive Gradio Web UI with a live tau slider
+├── evaluate.py                   # Metrics, classification report, calibration fit and tau sweep
 ├── export_onnx.py                # PyTorch to ONNX exporter with strict shape validation
 ├── requirements.txt              # Python environment dependencies
 ├── train.py                      # Training pipeline with AMP and graceful termination
@@ -131,10 +139,52 @@ pip install -r requirements.txt
 ```
 
 #### - Download the model weights
-Checkpoints are not committed, so place the release assets into the versioned folder:
+Checkpoints are not committed, so place the v2.2 release assets into the
+versioned weight folder and the calibration payload into `configs/calibration/`:
 ```text
-checkpoints/model_v2.1/CommandSense_v2.1.pth
-checkpoints/model_v2.1/CommandSense_v2.1.onnx   (optional, for the ONNX backend)
+checkpoints/model_v2.2/
+├── CommandSense_v2.2.pth
+└── CommandSense_v2.2.onnx
+
+configs/calibration/
+└── CommandSense_calibration_v2.2.json
+```
+The v2.2 release includes all three files so it can be tested without first
+downloading v2.1. The `.pth` and `.onnx` assets are provided under v2.2 filenames
+for a self-contained install; they contain the same model as v2.1 and do not
+represent a new training run or new learned weights. The v2.2 change is the
+calibration payload and runtime decision rule. `src/inference.py` and `app.py`
+discover the files at start-up: they load the weights, prefer the ONNX backend
+when `onnxruntime` is installed, and read `T` and `tau` from the JSON - no path
+ever has to be passed on the command line. `CommandSense_v2.2.onnx` is optional
+(PyTorch-only setups can drop it); the calibration JSON is versioned
+configuration rather than a weight, so it lives in `configs/` next to
+`labels.json` and is tracked in git.
+
+**Suggested v2.2 release note:** “This release includes standalone
+`CommandSense_v2.2.pth` and `CommandSense_v2.2.onnx` assets so v2.2 can be tested
+directly. The `.pth` weights are byte-for-byte identical to v2.1, and the ONNX
+asset runs the same raw-logit model; no new weights were trained. v2.2 adds
+post-hoc confidence calibration and threshold rejection. The release also
+includes `CommandSense_calibration_v2.2.json`; place it in `configs/calibration/`
+to enable the v2.2 confidence behavior.”
+
+Grab the assets from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases)
+and drop them in place, or produce them locally with the commands below. The
+inferencer only loads model files for the configured version (`MODEL_VERSION`).
+If that version's `.pth` and `.onnx` files are both missing, initialization
+raises a clear error; it will not silently substitute another version. A missing
+or unusable calibration file still falls back to `T = 1.0` / `tau = 0.0`.
+
+The report folder of the release holds calibration artifacts only; v2.2 trains
+nothing, so there is deliberately no `training_curves_v2.2.png`:
+```text
+reports/model_v2.2/
+├── report_v2.2.txt
+├── calibration_v2.2.png
+├── coverage_vs_accuracy_v2.2.png
+├── confusion_matrix_v2.2.png
+└── README.md
 ```
 
 #### - Launch interactive Web UI
@@ -145,9 +195,10 @@ python app.py
 #### - Reproduce the published metrics
 ```text
 python train.py       # trains v2.1; downloads Speech Commands and LibriSpeech on first run
-python evaluate.py    # writes reports/model_v2.1/report_v2.1.txt + confusion matrix
+python evaluate.py    # fits T/tau -> configs/calibration/ + reports/model_v2.2/
+python export_onnx.py # optional: writes CommandSense_v2.2.onnx with T/tau in its metadata_props
 ```
-The first training run downloads Speech Commands v0.02 (≈2.3 GB) and LibriSpeech `train-clean-100` (≈6.3 GB).
+The first training run downloads Speech Commands v0.02 (≈2.3 GB) and LibriSpeech `train-clean-100` (≈6.3 GB). v2.2 requires no training of its own: `evaluate.py` fits its single temperature on the validation split and never takes a gradient step.
 
 ---
 
@@ -160,7 +211,58 @@ v2.1 introduces two non-command classes so the model can decline to answer:
 | `_silence_` | 4 of the 6 `_background_noise_` recordings | the 2 held-out recordings | 97.82% (538/550) |
 | `_unknown_` | LibriSpeech `train-clean-100` (OOV read speech) | LibriSpeech `dev-clean` (disjoint speakers) | 98.36% (541/550) |
 
-Rejection is a learned class, not a confidence threshold: the model outputs `_silence_` or `_unknown_` as the argmax label. When it does so on a real command, that command is lost — currently **0.34 % of command clips** (37 of 11,005). A calibrated confidence threshold on top of the class scores is the subject of v2.2.0 in the roadmap.
+Rejection is a learned class, not a confidence threshold: the model outputs `_silence_` or `_unknown_` as the argmax label. When it does so on a real command, that command is lost — currently **0.34 % of command clips** (37 of 11,005). The recalls above are from the v2.1 pass; v2.2 re-draws the same 1,100 evaluation clips and measures 98.36 % (541/550) and 99.09 % (545/550), so read those two cells as samples rather than constants.
+
+v2.2 adds the second, orthogonal half of the story: a **calibrated confidence threshold** that rejects the clips the model is unsure about — including command clips the learned classes cannot catch. See [Calibration & Confidence Thresholding](#-calibration--confidence-thresholding-v22).
+
+---
+
+## - Calibration & Confidence Thresholding (v2.2)
+
+v2.1 reports `softmax(logits)` as its confidence, and that number is systematically **too high**: the clips it labels at 90 % confidence are right far less often than 90 % of the time. **v2.2 fixes the confidence, not the accuracy.** It is a post-hoc calibration release — it trains nothing, owns no parameters and loads the v2.1 checkpoint unchanged.
+
+| | v2.1 | v2.2 |
+| :--- | :--- | :--- |
+| Weights | 1,217,349 parameters | identical, frozen (no gradient step is ever taken) |
+| Reported confidence | raw `softmax(logits)`, over-confident | `softmax(logits / T)`, `T = 1.8074` fitted on the validation split |
+| Rejection | learned classes `_silence_` / `_unknown_`, decided by the argmax | learned classes **plus** a calibrated confidence threshold `tau* = 0.80` |
+| ONNX graph | raw logits | raw logits, unchanged, with `T` and `tau` in `metadata_props` |
+| Serving | `app.py` shows the argmax label | `app.py` adds the calibrated confidence, an accept/reject badge and a live `tau` slider |
+
+**Temperature scaling** (Guo et al., 2017) divides every logit by the same positive scalar before the softmax, so the ranking of the classes — and therefore the argmax — is mathematically unchanged. Top-1 on the 35 commands is **identical to v2.1 by construction**: 94.1481 % (10,361 / 11,005). Only the confidences move.
+
+| Split | Clips | NLL (`T = 1` → `T = 1.8074`) | ECE (→) | MCE (→) |
+| :--- | ---: | ---: | ---: | ---: |
+| Validation — where `T` was fitted | 10,979 | 0.240624 → 0.190525 | 0.024844 → **0.005109** | 0.269240 → 0.100179 |
+| Testing — out of sample | 12,105 | 0.239402 → 0.195932 | 0.025993 → **0.007664** | 0.226169 → 0.115049 |
+
+The test ECE falls by 70.5 % even though `T` was fitted on a different split, which is the practical advantage of temperature scaling: one parameter, ≈11 k clips, nothing to overfit.
+
+### - Confidence Threshold Decision
+
+A clip is answered only when its calibrated top-1 probability reaches `tau`; otherwise it is served as `_unknown_`, the project's existing reject class. `tau` is swept over `[0, 1]` in steps of `0.01` on the validation split and selected by `min_cost` (`FRR + FAR`) under a 90 % coverage floor, which picks `tau* = 0.80`.
+
+| Metric (testing split, 12,105 clips) | Value |
+| :--- | ---: |
+| Coverage (clips answered) | **89.3350 %** (10,814 / 12,105) |
+| Retained accuracy (answered clips only) | **98.6591 %** (10,669 / 10,814) |
+| False rejection rate — correct clips discarded | 6.7965 % |
+| False acceptance rate — incorrect clips served | 22.0365 % |
+| Accuracy with no threshold at all | 94.5642 % of all clips |
+| End-to-end yield — answered **and** correct | 88.1371 % of all clips |
+| Rejected as uncertain | 10.6650 % (served as `_unknown_`) |
+
+The threshold buys **precision, not accuracy**. At `tau*` the answers that are given are correct 98.66 % of the time instead of 94.56 %, and 513 of the split's 658 errors are suppressed before they reach a caller. The price is coverage: 778 correct clips are discarded, so the end-to-end yield of *correct and answered* clips (88.14 %) is **below** the 94.56 % the threshold-free model scores on every clip. The 145 wrong predictions that still clear `tau` are served with no warning — a threshold reduces errors, it does not remove them.
+
+#### - Deployment
+
+* `configs/calibration/CommandSense_calibration_v2.2.json` is the deployment payload (the fitted `T` and `tau`). It carries no weights, so it is committed with the code instead of living in the git-ignored `checkpoints/` tree.
+* `src/inference.py` resolves that JSON by itself — `configs/calibration/` first, then the configured version's checkpoint folder as a legacy location — and names the file it read at start-up. If it is missing, unreadable or unusable, the inferencer falls back on `T = 1.0` / `tau = 0.0` — raw logits, no confidence rejection, i.e. the v2.1 decision rule — and never raises. Model weights are not substituted across versions: if no model asset for the configured version is present, initialization raises an actionable error.
+* The exported graph keeps emitting **raw logits** and stores the same values in its `metadata_props` under `commandsense.calibration.*`, so `T` and `tau` can be changed without re-exporting the model.
+* `src/inference.py` applies `softmax(logits / T)` in Python, identically for the ONNX and PyTorch backends, and every response carries `raw_label` (the raw argmax) and `is_low_confidence`, so a threshold rejection can be told apart from the learned `_unknown_` class.
+* Verified end to end: `_background_noise_/doing_the_dishes.wav` is answered `_silence_` with confidence `0.9994` on both backends, and a command clip scored `0.9613` is served at `tau = 0.80` but becomes `_unknown_` with `raw_label = backward` at `tau = 0.99`.
+
+The reliability diagram, the coverage/accuracy curve, the full `tau` sweep and the before/after counts live in the [v2.2 model card](reports/model_v2.2/README.md).
 
 ---
 

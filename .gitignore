@@ -1,5 +1,6 @@
 # Dataset and Models
 data/
+logs/
 checkpoints/
 onnx/
 *.pth
