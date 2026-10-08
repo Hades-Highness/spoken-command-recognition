@@ -149,19 +149,32 @@ checkpoints/model_v2.2/
 configs/calibration/
 └── CommandSense_calibration_v2.2.json
 ```
-Together the three files form one self-contained bundle. `src/inference.py` and
-`app.py` discover them on their own at start-up: they load the weights, prefer the
-ONNX backend when `onnxruntime` is installed, and read `T` and `tau` from the JSON -
-no path ever has to be passed on the command line. `CommandSense_v2.2.onnx` is
-optional (PyTorch-only setups can drop it); the calibration JSON is versioned
+The v2.2 release includes all three files so it can be tested without first
+downloading v2.1. The `.pth` and `.onnx` assets are provided under v2.2 filenames
+for a self-contained install; they contain the same model as v2.1 and do not
+represent a new training run or new learned weights. The v2.2 change is the
+calibration payload and runtime decision rule. `src/inference.py` and `app.py`
+discover the files at start-up: they load the weights, prefer the ONNX backend
+when `onnxruntime` is installed, and read `T` and `tau` from the JSON - no path
+ever has to be passed on the command line. `CommandSense_v2.2.onnx` is optional
+(PyTorch-only setups can drop it); the calibration JSON is versioned
 configuration rather than a weight, so it lives in `configs/` next to
 `labels.json` and is tracked in git.
 
+**Suggested v2.2 release note:** “This release includes standalone
+`CommandSense_v2.2.pth` and `CommandSense_v2.2.onnx` assets so v2.2 can be tested
+directly. The `.pth` weights are byte-for-byte identical to v2.1, and the ONNX
+asset runs the same raw-logit model; no new weights were trained. v2.2 adds
+post-hoc confidence calibration and threshold rejection. The release also
+includes `CommandSense_calibration_v2.2.json`; place it in `configs/calibration/`
+to enable the v2.2 confidence behavior.”
+
 Grab the assets from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases)
-and drop them in place, or produce them locally with the commands below. If the
-bundle is incomplete, the inferencer reuses `checkpoints/model_v2.1/*` for the
-weights and falls back on `T = 1.0` / `tau = 0.0` for the calibration - raw
-logits, no confidence rejection, no crash.
+and drop them in place, or produce them locally with the commands below. The
+inferencer only loads model files for the configured version (`MODEL_VERSION`).
+If that version's `.pth` and `.onnx` files are both missing, initialization
+raises a clear error; it will not silently substitute another version. A missing
+or unusable calibration file still falls back to `T = 1.0` / `tau = 0.0`.
 
 The report folder of the release holds calibration artifacts only; v2.2 trains
 nothing, so there is deliberately no `training_curves_v2.2.png`:
@@ -244,7 +257,7 @@ The threshold buys **precision, not accuracy**. At `tau*` the answers that are g
 #### - Deployment
 
 * `configs/calibration/CommandSense_calibration_v2.2.json` is the deployment payload (the fitted `T` and `tau`). It carries no weights, so it is committed with the code instead of living in the git-ignored `checkpoints/` tree.
-* `src/inference.py` resolves that JSON by itself — `configs/calibration/` first, then the version's checkpoint folder as a legacy location, then the v2.1 file — and names the file it read at start-up. If it is missing, unreadable or unusable, the inferencer falls back on `T = 1.0` / `tau = 0.0` — raw logits, no confidence rejection, i.e. the v2.1 decision rule — and never raises, so an incomplete bundle degrades instead of breaking the server.
+* `src/inference.py` resolves that JSON by itself — `configs/calibration/` first, then the configured version's checkpoint folder as a legacy location — and names the file it read at start-up. If it is missing, unreadable or unusable, the inferencer falls back on `T = 1.0` / `tau = 0.0` — raw logits, no confidence rejection, i.e. the v2.1 decision rule — and never raises. Model weights are not substituted across versions: if no model asset for the configured version is present, initialization raises an actionable error.
 * The exported graph keeps emitting **raw logits** and stores the same values in its `metadata_props` under `commandsense.calibration.*`, so `T` and `tau` can be changed without re-exporting the model.
 * `src/inference.py` applies `softmax(logits / T)` in Python, identically for the ONNX and PyTorch backends, and every response carries `raw_label` (the raw argmax) and `is_low_confidence`, so a threshold rejection can be told apart from the learned `_unknown_` class.
 * Verified end to end: `_background_noise_/doing_the_dishes.wav` is answered `_silence_` with confidence `0.9994` on both backends, and a command clip scored `0.9613` is served at `tau = 0.80` but becomes `_unknown_` with `raw_label = backward` at `tau = 0.99`.

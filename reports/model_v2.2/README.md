@@ -17,7 +17,7 @@
 * **Base weights**: v2.1, reused as-is. **v2.2 trains nothing and owns no parameters of its own** (1,217,349 parameters, ≈4.87 MB in float32)
 * **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions
 * **Target Classes (37)**: `_silence_`, `_unknown_`, and the 35 command words `backward`, `bed`, `bird`, `cat`, `dog`, `down`, `eight`, `five`, `follow`, `forward`, `four`, `go`, `happy`, `house`, `learn`, `left`, `marvin`, `nine`, `no`, `off`, `on`, `one`, `right`, `seven`, `sheila`, `six`, `stop`, `three`, `tree`, `two`, `up`, `visual`, `wow`, `yes`, `zero`.
-* **Artifacts**: the weights and the graph live in `checkpoints/model_v2.2/` — `CommandSense_v2.2.pth` (the frozen v2.1 weights, SHA-256 identical to `CommandSense_v2.1.pth`) and `CommandSense_v2.2.onnx` (the same raw-logit graph, carrying `T` and `tau` as 17 `metadata_props` entries) — while the payload the runtime actually reads, `CommandSense_calibration_v2.2.json`, lives in `configs/calibration/`: it is versioned configuration, not a weight, so it is committed with the code rather than with the git-ignored checkpoints.
+* **Artifacts**: the v2.2 release provides a standalone bundle: `CommandSense_v2.2.pth` and `CommandSense_v2.2.onnx` are distributed under v2.2 filenames so users do not need to fetch v2.1 separately. They contain the same frozen model as v2.1; the `.pth` files have identical SHA-256 hashes, and the ONNX graph emits the same raw logits. No new model weights were trained. The exported ONNX graph also carries the v2.2 calibration in its `metadata_props`; the runtime reads the canonical payload, `CommandSense_calibration_v2.2.json`, from `configs/calibration/`. This JSON is versioned configuration, not a weight, so it is committed with the code rather than with the git-ignored checkpoints.
 * **Scope**: post-hoc confidence calibration and confidence-threshold rejection on top of an already-trained model. v2.2 answers the question *"how much should the model's confidence be trusted?"*, not *"is the model more accurate?"*.
 
 ---
@@ -149,23 +149,19 @@ its own paths at start-up, in this order.
 | :--- | :--- |
 | Weights | `checkpoints/model_v2.2/CommandSense_v2.2.pth` → `checkpoints/model_v2.1/CommandSense_v2.1.pth` |
 | ONNX | `checkpoints/model_v2.2/CommandSense_v2.2.onnx` → `checkpoints/model_v2.1/CommandSense_v2.1.onnx` → `onnx/` |
-| `T` / `tau` | `configs/calibration/CommandSense_calibration_v2.2.json` → `checkpoints/model_v2.2/*_calibration_v2.2.json` (legacy) → the v2.1 calibration file |
+| `T` / `tau` | `configs/calibration/CommandSense_calibration_v2.2.json` → `checkpoints/model_v2.2/*_calibration_v2.2.json` (legacy) |
 
 A startup log line names the file that was actually read, and every response
 carries the `temperature` and `threshold` in force, so a deployment can always
 prove which calibration it is serving.
 
-**Fallback.** If the calibration file is absent, unreadable, malformed or holds
-values the runtime cannot apply (`T <= 0`, `tau` outside `[0, 1]`), the
-inferencer prints a warning and falls back on `T = 1.0` / `tau = 0.0`. That is
-the v2.1 decision rule — raw logits, nothing rejected for low confidence — and it
-is chosen deliberately: a missing artifact must degrade the release, never break
-it or silently drop predictions. The reader swallows every failure mode of the
-file itself — `OSError` (unreadable), `json.JSONDecodeError` (truncated or
-malformed) and `UnicodeDecodeError` (not UTF-8) — and returns an empty payload.
-Verified on all five cases (missing file, malformed JSON, non-UTF-8 bytes,
-`T = 0`, non-numeric `T`): the engine starts, serves the raw argmax and never
-raises.
+**Fallback.** If the calibration file is absent, unreadable, malformed or holds values the
+runtime cannot apply (`T <= 0`, `tau` outside `[0, 1]`), the inferencer prints a
+warning and falls back on `T = 1.0` / `tau = 0.0`. That is the raw-logit decision
+rule with no low-confidence rejection. **Model weights are different:** the
+inferencer only loads assets for the configured version. If neither the matching
+`.pth` nor `.onnx` file exists, initialization raises an error explaining where
+to place the versioned release assets; it does not substitute v2.1 weights.
 
 ---
 
@@ -189,4 +185,3 @@ The only moving part is the rejection population. The 1,100 `_silence_` / `_unkn
 The residue shows up in **precision**, never in recall: the macro recall over the 35 commands is identical to four decimals (0.9322), and classes such as `go`, `two` and `up` gained a few hundredths of a point of precision because fewer rejection clips were misread as those words.
 
 `evaluate.py` seeds the RNG (`SEED = 42`), so **re-running v2.2 reproduces this card exactly**: a verification pass returns `T = 1.807422`, `tau* = 0.80` and the same validation operating point (coverage 90.19 %, retained accuracy 98.94 %, FRR 6.01 %, FAR 18.88 %). The gap against v2.1 is a difference between two *code revisions*, not between two runs of the same code.
-

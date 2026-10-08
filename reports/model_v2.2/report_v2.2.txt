@@ -4,7 +4,7 @@
 
 Model version    : v2.2 (post-hoc calibration release)
 Base weights     : v2.1 (reused, nothing was retrained)
-Checkpoint       : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v2.1\CommandSense_v2.1.pth
+Checkpoint       : checkpoints/model_v2.1/CommandSense_v2.1.pth
 Device           : cpu
 Calibration split: 'validation' (10979 samples) - fits T and tau
 Evaluation split : 'testing' (12105 samples) - untouched by the fit
@@ -113,4 +113,3 @@ NOTES
   between operating points.
 * The exported ONNX graph keeps raw logits; T and tau are applied by the Python
   runtime, so the threshold can be changed without re-exporting the model.
-

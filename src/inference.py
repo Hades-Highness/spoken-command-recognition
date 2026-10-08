@@ -3,9 +3,7 @@
 Resolution order for the checkpoint:
 
 1. ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth``  (canonical)
-2. ``checkpoints/model_<BASE_MODEL_VERSION>/...``              (weights reused by
-   a calibration-only release such as v2.2, which ships no checkpoint of its own)
-3. ``checkpoints/<MODEL_NAME>_<version>.pth``                 (legacy layout)
+2. ``checkpoints/<MODEL_NAME>_<version>.pth``                  (legacy layout)
 
 Backend selection:
 
@@ -43,7 +41,6 @@ import torch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from configs.config import (  # noqa: E402
-    BASE_MODEL_VERSION,
     CHECKPOINT_DIR,
     DEFAULT_CONFIDENCE_THRESHOLD,
     DEFAULT_TEMPERATURE,
@@ -132,7 +129,9 @@ class CommandInferencer:
             raise ModelUnavailableError(
                 "No usable model found. Expected either "
                 f"'{checkpoint_dir(self.version)}/{MODEL_NAME}_{self.version}.pth' or "
-                f"a matching .onnx file. Download the release asset or run train.py."
+                f"'{checkpoint_dir(self.version)}/{MODEL_NAME}_{self.version}.onnx'. "
+                f"Download the CommandSense {self.version} model assets into that "
+                "version's checkpoint folder, or train/export that version first."
             )
 
         self.load_calibration(
@@ -149,10 +148,8 @@ class CommandInferencer:
         The canonical file is
         ``configs/calibration/CommandSense_calibration_v2.2.json`` (see
         :func:`configs.config.calibration_path`), which is resolved here
-        automatically; the version's checkpoint folder is still probed as a
-        legacy location, and a calibration-only release such as v2.2 also accepts
-        the calibration file of ``BASE_MODEL_VERSION`` when it has none of its
-        own.
+        automatically; the configured version's checkpoint folder is also
+        probed as a legacy location.
 
         Nothing in this method can raise. An absent, unreadable, unparsable or
         semantically unusable file leaves the defaults from ``configs/config.py``
@@ -160,28 +157,23 @@ class CommandInferencer:
         for low confidence) - so the application keeps serving the v2.1 decision
         rule instead of crashing.
         """
-        for candidate_version in (self.version, BASE_MODEL_VERSION):
-            path = calibration.resolve_calibration_file(candidate_version)
-            if path is None:
-                continue
+        path = calibration.resolve_calibration_file(self.version)
+        if path is not None:
             payload = calibration.load_calibration(path)
-            if not payload:
-                continue
-            if not self._usable_calibration(payload):
+            if payload and not self._usable_calibration(payload):
                 print(
                     f"[!] Ignoring unusable calibration file {path}: T must be a "
                     "positive number and tau a probability in [0, 1]. Falling back "
                     f"on T={DEFAULT_TEMPERATURE:.4f}, "
                     f"tau={DEFAULT_CONFIDENCE_THRESHOLD:.2f}."
                 )
-                continue
-            self.calibration = payload
-            self.calibration_source = str(path)
-            print(
-                f"[+] Loaded calibration (T={payload.get('temperature')}, "
-                f"tau={payload.get('confidence_threshold')}) <- {path}"
-            )
-            break
+            elif payload:
+                self.calibration = payload
+                self.calibration_source = str(path)
+                print(
+                    f"[+] Loaded calibration (T={payload.get('temperature')}, "
+                    f"tau={payload.get('confidence_threshold')}) <- {path}"
+                )
 
         if not self.calibration:
             print(
@@ -241,7 +233,6 @@ class CommandInferencer:
         candidates = [
             checkpoint_path,
             checkpoint_dir(self.version) / f"{MODEL_NAME}_{self.version}.pth",
-            checkpoint_dir(BASE_MODEL_VERSION) / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.pth",
             CHECKPOINT_DIR / f"{MODEL_NAME}_{self.version}.pth",
         ]
         for candidate in candidates:
@@ -252,10 +243,8 @@ class CommandInferencer:
     def _resolve_onnx(self):
         candidates = [
             checkpoint_dir(self.version) / f"{MODEL_NAME}_{self.version}.onnx",
-            checkpoint_dir(BASE_MODEL_VERSION) / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.onnx",
             CHECKPOINT_DIR / f"{MODEL_NAME}_{self.version}.onnx",
             ONNX_DIR / f"{MODEL_NAME}_{self.version}.onnx",
-            ONNX_DIR / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.onnx",
         ]
         for candidate in candidates:
             if os.path.exists(candidate):
@@ -296,7 +285,9 @@ class CommandInferencer:
             return
         if self.pth_path is None:
             raise FileNotFoundError(
-                f"PyTorch checkpoint not found for '{self.version}' under '{CHECKPOINT_DIR}'."
+                f"PyTorch checkpoint for CommandSense {self.version} was not found. "
+                f"Download '{MODEL_NAME}_{self.version}.pth' into "
+                f"'{checkpoint_dir(self.version)}' or train that version first."
             )
 
         model = CommandSense(num_classes=len(self.labels), in_channels=EXPECTED_CHANNELS)
@@ -312,8 +303,10 @@ class CommandInferencer:
             return
         if self.onnx_path is None:
             raise FileNotFoundError(
-                f"ONNX model not found for '{self.version}'. Export it with "
-                "'python export_onnx.py' or download the release asset."
+                f"ONNX model for CommandSense {self.version} was not found. "
+                f"Download '{MODEL_NAME}_{self.version}.onnx' into "
+                f"'{checkpoint_dir(self.version)}' or export that version with "
+                "'python export_onnx.py'."
             )
 
         import onnxruntime as ort
@@ -460,4 +453,3 @@ if __name__ == "__main__":
         f"(source: {engine.calibration_source or 'defaults'})"
     )
     print(f"[+] Classes            : {len(engine.labels)}")
-

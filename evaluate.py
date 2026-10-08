@@ -448,6 +448,9 @@ def main():
     print(f"[*] Loading model checkpoint: {checkpoint_path}")
     if MODEL_VERSION not in os.path.basename(checkpoint_path):
         print(f"[i] {MODEL_VERSION} ships no weights of its own: reusing {BASE_MODEL_VERSION}.")
+    checkpoint_reference = os.path.relpath(
+        checkpoint_path, os.path.dirname(__file__)
+    ).replace(os.sep, "/")
 
     model = CommandSense(num_classes=NUM_CLASSES, in_channels=3).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -616,7 +619,7 @@ def main():
     suffix = "_interrupted" if interrupted else ""
 
     meta = {
-        "checkpoint": checkpoint_path,
+        "checkpoint": checkpoint_reference,
         "device": str(device),
         "temperature": temperature,
         "tau": tau,
@@ -677,7 +680,7 @@ def main():
         threshold_criterion=THRESHOLD_CRITERION,
         calibration_split=f"{CALIBRATION_SUBSET} ({calibration_summary['n_samples']} samples)",
         calibration_samples=calibration_summary["n_samples"],
-        source_checkpoint=checkpoint_path,
+        source_checkpoint=checkpoint_reference,
         reject_label=REJECT_LABEL,
     )
     if interrupted:
