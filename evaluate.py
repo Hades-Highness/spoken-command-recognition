@@ -11,7 +11,7 @@ The run has two halves, and they never share a split:
 Artifacts written to ``reports/model_v2.2/``::
 
     report_v2.2.txt                 human-readable metrics
-    reliability_diagram_v2.2.png    confidence vs accuracy, before/after T
+    calibration_v2.2.png            confidence vs accuracy, before/after T
     coverage_vs_accuracy_v2.2.png   coverage / retained accuracy / FRR / FAR vs tau
     confusion_matrix_v2.2.png       37x37 confusion matrix of the evaluation split
 
@@ -642,7 +642,7 @@ def main():
         evaluation_summary or calibration_summary,
         temperature,
         f"Reliability Diagram - {MODEL_NAME} {MODEL_VERSION} ({split_for_plots} split)",
-        os.path.join(out_dir, f"reliability_diagram_{MODEL_VERSION}{suffix}.png"),
+        os.path.join(out_dir, f"calibration_{MODEL_VERSION}{suffix}.png"),
     )
     plot_coverage_vs_accuracy(
         evaluation_sweep,

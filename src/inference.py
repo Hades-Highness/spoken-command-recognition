@@ -21,6 +21,14 @@ exported graph never has to be rebuilt when ``T`` or the threshold changes. Ever
 prediction also carries a confidence-threshold decision: when the calibrated
 top-1 probability stays below ``tau``, the served label becomes the reject label
 (``REJECT_LABEL``) and ``is_low_confidence`` is set.
+
+Safety fallback: when no calibration file can be read - absent, unreadable or
+holding values the runtime cannot apply - the inferencer falls back on
+``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead
+of raising. Raw logits are then served and nothing is rejected for low
+confidence, which is exactly the v2.1 decision rule, so a missing
+``CommandSense_calibration_v2.2.json`` degrades the release instead of breaking
+the application.
 """
 
 import json
@@ -50,6 +58,24 @@ from src.utils import load_and_preprocess_audio  # noqa: E402
 
 EXPECTED_CHANNELS = 3
 EXPECTED_TIME_FRAMES = 63
+
+
+def _positive_float(value):
+    """Return ``value`` as a finite ``float`` > 0, or ``None`` when it is unusable."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) and number > 0.0 else None
+
+
+def _probability_float(value):
+    """Return ``value`` as a finite ``float`` inside [0, 1], or ``None``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
 class ModelUnavailableError(RuntimeError):
@@ -117,10 +143,17 @@ class CommandInferencer:
     def load_calibration(self, temperature=None, confidence_threshold=None) -> dict:
         """Load ``T``/``tau`` from the version's calibration JSON.
 
-        A calibration-only release (v2.2) reuses the weights and the calibration
-        file of ``BASE_MODEL_VERSION`` when it has none of its own. Whatever is
-        missing falls back to the configured defaults, so an absent or partial
-        file never breaks inference.
+        The canonical file is
+        ``checkpoints/model_v2.2/CommandSense_calibration_v2.2.json`` (see
+        :func:`configs.config.calibration_path`), which is resolved here
+        automatically; a calibration-only release such as v2.2 also accepts the
+        calibration file of ``BASE_MODEL_VERSION`` when it has none of its own.
+
+        Nothing in this method can raise. An absent, unreadable, unparsable or
+        semantically unusable file leaves the defaults from ``configs/config.py``
+        in place - ``T = 1.0`` (raw logits) and ``tau = 0.0`` (nothing is rejected
+        for low confidence) - so the application keeps serving the v2.1 decision
+        rule instead of crashing.
         """
         for candidate_version in (self.version, BASE_MODEL_VERSION):
             path = calibration.resolve_calibration_file(candidate_version)
@@ -128,6 +161,14 @@ class CommandInferencer:
                 continue
             payload = calibration.load_calibration(path)
             if not payload:
+                continue
+            if not self._usable_calibration(payload):
+                print(
+                    f"[!] Ignoring unusable calibration file {path}: T must be a "
+                    "positive number and tau a probability in [0, 1]. Falling back "
+                    f"on T={DEFAULT_TEMPERATURE:.4f}, "
+                    f"tau={DEFAULT_CONFIDENCE_THRESHOLD:.2f}."
+                )
                 continue
             self.calibration = payload
             self.calibration_source = str(path)
@@ -139,9 +180,10 @@ class CommandInferencer:
 
         if not self.calibration:
             print(
-                "[!] No calibration file found; using defaults "
-                f"(T={self.temperature:.4f}, tau={self.confidence_threshold:.2f}). "
-                "Run evaluate.py to fit them."
+                "[!] No calibration file found; falling back on the defaults "
+                f"(T={DEFAULT_TEMPERATURE:.4f}, tau={DEFAULT_CONFIDENCE_THRESHOLD:.2f}): "
+                "raw logits are served and no clip is rejected for low confidence. "
+                "Run evaluate.py to fit T and tau."
             )
 
         self.set_calibration(
@@ -149,6 +191,21 @@ class CommandInferencer:
             confidence_threshold=confidence_threshold,
         )
         return self.calibration
+
+    @staticmethod
+    def _usable_calibration(payload: dict) -> bool:
+        """True when every value present in ``payload`` can be applied safely.
+
+        While missing keys are fine - they simply keep their configured default -
+        a value that *is* present has to be a positive ``T`` and a ``tau`` inside
+        [0, 1]; anything else is refused so the defaults are served rather than a
+        file that would make ``softmax(logits / T)`` fail at prediction time.
+        """
+        temperature = _positive_float(payload.get("temperature", DEFAULT_TEMPERATURE))
+        threshold = _probability_float(
+            payload.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
+        )
+        return temperature is not None and threshold is not None
 
     def set_calibration(self, temperature=None, confidence_threshold=None) -> None:
         """Override ``T`` and/or ``tau`` at runtime (e.g. from the UI slider).

@@ -96,7 +96,7 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 .
 ├── checkpoints/                  # Model weight releases (git-ignored; created at runtime)
 │   ├── model_v2.1/               # CommandSense_v2.1.pth, CommandSense_v2.1.onnx
-│   └── model_v2.2/               # CommandSense_calibration_v2.2.json (T + tau; ships no weights)
+│   └── model_v2.2/               # v2.2 bundle: CommandSense_v2.2.pth/.onnx + CommandSense_calibration_v2.2.json
 ├── configs/                      # Global hyperparameters, paths and the class mapping
 │   ├── config.py                 # Training, audio and calibration settings
 │   └── labels.json               # Index -> class name mapping (37 entries for v2.1)
@@ -107,7 +107,7 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 │   ├── model_v1.0/
 │   ├── model_v2.0/
 │   ├── model_v2.1/
-│   └── model_v2.2/               # Calibration report, tau sweep, reliability & coverage plots
+│   └── model_v2.2/               # Calibration report, JSON/PNG artifacts and reliability plot
 ├── src/                          # Source code modules
 │   ├── calibration.py            # Temperature scaling, ECE / reliability, tau sweep (v2.2)
 │   ├── dataset.py                # Speech Commands + rejection-class construction
@@ -138,10 +138,37 @@ pip install -r requirements.txt
 ```
 
 #### - Download the model weights
-Checkpoints are not committed, so place the release assets into the versioned folder:
+Checkpoints are not committed, so place the v2.2 release assets into the
+versioned folder:
 ```text
-checkpoints/model_v2.1/CommandSense_v2.1.pth
-checkpoints/model_v2.1/CommandSense_v2.1.onnx   (optional, for the ONNX backend)
+checkpoints/model_v2.2/
+├── CommandSense_v2.2.pth
+├── CommandSense_v2.2.onnx
+└── CommandSense_calibration_v2.2.json
+```
+The three files form one self-contained bundle. `src/inference.py` and `app.py`
+discover them on their own at start-up: they load the weights, prefer the ONNX
+backend when `onnxruntime` is installed, and read `T` and `tau` from the JSON -
+no path ever has to be passed on the command line. `CommandSense_v2.2.onnx` is
+optional (PyTorch-only setups can drop it) and the JSON is the calibration
+payload, so keep it next to the weights.
+
+Grab the assets from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases)
+and drop them in `checkpoints/model_v2.2/`, or produce them locally with the
+commands below. If the bundle is incomplete, the inferencer reuses
+`checkpoints/model_v2.1/*` for the weights and falls back on `T = 1.0` /
+`tau = 0.0` for the calibration - raw logits, no confidence rejection, no crash.
+
+The report folder of the release holds calibration artifacts only; v2.2 trains
+nothing, so there is deliberately no `training_curves_v2.2.png`:
+```text
+reports/model_v2.2/
+├── report_v2.2.txt
+├── calibration_v2.2.json
+├── calibration_v2.2.png
+├── coverage_vs_accuracy_v2.2.png
+├── confusion_matrix_v2.2.png
+└── README.md
 ```
 
 #### - Launch interactive Web UI
@@ -153,7 +180,7 @@ python app.py
 ```text
 python train.py       # trains v2.1; downloads Speech Commands and LibriSpeech on first run
 python evaluate.py    # fits T/tau and writes reports/model_v2.2/ + checkpoints/model_v2.2/
-python export_onnx.py # optional: re-export the v2.1 graph with T/tau in its metadata_props
+python export_onnx.py # optional: writes CommandSense_v2.2.onnx with T/tau in its metadata_props
 ```
 The first training run downloads Speech Commands v0.02 (≈2.3 GB) and LibriSpeech `train-clean-100` (≈6.3 GB). v2.2 requires no training of its own: `evaluate.py` fits its single temperature on the validation split and never takes a gradient step.
 
@@ -214,6 +241,7 @@ The threshold buys **precision, not accuracy**. At `tau*` the answers that are g
 #### - Deployment
 
 * `checkpoints/model_v2.2/CommandSense_calibration_v2.2.json` is the deployment payload (the fitted `T` and `tau`). It carries no weights.
+* `src/inference.py` resolves that JSON by itself (the checkpoint folder of the version, then the v2.1 one) and names the file it read at start-up. If it is missing, unreadable or unusable, the inferencer falls back on `T = 1.0` / `tau = 0.0` — raw logits, no confidence rejection, i.e. the v2.1 decision rule — and never raises, so an incomplete bundle degrades instead of breaking the server.
 * The exported graph keeps emitting **raw logits** and stores the same values in its `metadata_props` under `commandsense.calibration.*`, so `T` and `tau` can be changed without re-exporting the model.
 * `src/inference.py` applies `softmax(logits / T)` in Python, identically for the ONNX and PyTorch backends, and every response carries `raw_label` (the raw argmax) and `is_low_confidence`, so a threshold rejection can be told apart from the learned `_unknown_` class.
 * Verified end to end: `_background_noise_/doing_the_dishes.wav` is answered `_silence_` with confidence `0.9994` on both backends, and a command clip scored `0.9613` is served at `tau = 0.80` but becomes `_unknown_` with `raw_label = backward` at `tau = 0.99`.

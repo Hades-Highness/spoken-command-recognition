@@ -17,7 +17,7 @@
 * **Base weights**: v2.1, reused as-is. **v2.2 trains nothing and owns no parameters of its own** (1,217,349 parameters, ≈4.87 MB in float32)
 * **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions
 * **Target Classes (37)**: `_silence_`, `_unknown_`, and the 35 command words `backward`, `bed`, `bird`, `cat`, `dog`, `down`, `eight`, `five`, `follow`, `forward`, `four`, `go`, `happy`, `house`, `learn`, `left`, `marvin`, `nine`, `no`, `off`, `on`, `one`, `right`, `seven`, `sheila`, `six`, `stop`, `three`, `tree`, `two`, `up`, `visual`, `wow`, `yes`, `zero`.
-* **Artifacts**: `CommandSense_calibration_v2.2.json` (the deployment payload: `T` and `tau`) plus a re-exported `CommandSense_v2.1.onnx` carrying the same values inside its `metadata_props`. Weights remain the v2.1 `.pth`.
+* **Artifacts**: the released bundle `checkpoints/model_v2.2/` holds `CommandSense_v2.2.pth` (the frozen v2.1 weights, SHA-256 identical to `CommandSense_v2.1.pth`), `CommandSense_v2.2.onnx` (the same raw-logit graph, carrying `T` and `tau` as 17 `metadata_props` entries) and `CommandSense_calibration_v2.2.json` (the deployment payload the runtime actually reads).
 * **Scope**: post-hoc confidence calibration and confidence-threshold rejection on top of an already-trained model. v2.2 answers the question *"how much should the model's confidence be trusted?"*, not *"is the model more accurate?"*.
 
 ---
@@ -74,7 +74,7 @@ Rejected clips reuse the project's existing `_unknown_` label, so a threshold re
 
 ### - Reliability Diagram
 
-![Reliability Diagram](reliability_diagram_v2.2.png)
+![Reliability Diagram](calibration_v2.2.png)
 
 Before calibration the reliability curve sits **below the diagonal**: bins of clips predicted at 90 % confidence are right far less often than 90 % of the time, which is the classic signature of a network trained with a cross-entropy loss on a small, hard dataset. After dividing the logits by `T = 1.8074` the curve tracks the diagonal closely, and the maximum calibration error drops from 0.269 to 0.100 on the split where `T` was fitted.
 
@@ -139,6 +139,30 @@ The two rejection mechanisms are complementary rather than redundant:
 * The threshold catches **everything else the model is unsure about** — including real command clips it cannot recognise, which is precisely the failure mode a learned rejection class cannot fix.
 
 Both are reported in the response, so a caller can tell them apart: a background-noise clip is answered `_silence_` with confidence `0.9994` and is far above `tau` (verified with both backends on `_background_noise_/doing_the_dishes.wav`), while a command clip whose calibrated confidence is `0.9613` is served at `tau = 0.80` and becomes `_unknown_` with `raw_label = backward` at `tau = 0.99`.
+
+### - Loading the Artifacts
+
+Nothing has to be wired by hand: `CommandInferencer` (used by `app.py`) resolves
+its own paths at start-up, in this order.
+
+| What | Resolution order |
+| :--- | :--- |
+| Weights | `checkpoints/model_v2.2/CommandSense_v2.2.pth` → `checkpoints/model_v2.1/CommandSense_v2.1.pth` |
+| ONNX | `checkpoints/model_v2.2/CommandSense_v2.2.onnx` → `checkpoints/model_v2.1/CommandSense_v2.1.onnx` → `onnx/` |
+| `T` / `tau` | `checkpoints/model_v2.2/CommandSense_calibration_v2.2.json` → the v2.1 calibration file |
+
+A startup log line names the file that was actually read, and every response
+carries the `temperature` and `threshold` in force, so a deployment can always
+prove which calibration it is serving.
+
+**Fallback.** If the calibration file is absent, unreadable, malformed or holds
+values the runtime cannot apply (`T <= 0`, `tau` outside `[0, 1]`), the
+inferencer prints a warning and falls back on `T = 1.0` / `tau = 0.0`. That is
+the v2.1 decision rule — raw logits, nothing rejected for low confidence — and it
+is chosen deliberately: a missing artifact must degrade the release, never break
+it or silently drop predictions. Verified on all four cases (missing file,
+malformed JSON, `T = 0`, non-numeric `T`): the engine starts, serves the raw
+argmax and never raises.
 
 ---
 

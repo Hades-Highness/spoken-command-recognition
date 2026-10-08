@@ -62,8 +62,13 @@ TEMPERATURE_STEPS = 12                 # outer LBFGS steps (one step per call)
 TEMPERATURE_LR = 1.0                   # initial LBFGS step size
 TEMPERATURE_TOL = 1e-9                 # stop when the NLL stops improving
 TEMPERATURE_GRID = (0.05, 20.0)        # (min, max) clamp for the fitted T
+# Safety fallbacks used when no calibration file can be read (absent, unreadable
+# or holding values the runtime cannot apply). T = 1.0 serves the raw logits
+# unchanged and tau = 0.0 can never reject a clip, so a missing
+# CommandSense_calibration_v2.2.json degrades to exactly the v2.1 decision rule
+# instead of silently dropping predictions or crashing the server.
 DEFAULT_TEMPERATURE = 1.0              # T used when no calibration file exists
-DEFAULT_CONFIDENCE_THRESHOLD = 0.50    # tau used when no calibration file exists
+DEFAULT_CONFIDENCE_THRESHOLD = 0.0     # tau used when no calibration file exists
 CONFIDENCE_THRESHOLD_RANGE = (0.0, 1.0)
 CONFIDENCE_THRESHOLD_STEP = 0.01       # sweep resolution for tau
 # Label returned when max softmax < tau. '_unknown_' is the project's existing
