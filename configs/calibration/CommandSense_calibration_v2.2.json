@@ -14,6 +14,6 @@
     "threshold_criterion": "min_cost",
     "calibration_split": "validation (10979 samples)",
     "calibration_samples": 10979,
-    "source_checkpoint": "C:\\Users\\Administrator\\Documents\\Models\\spoken-command-recognition\\checkpoints\\model_v2.1\\CommandSense_v2.1.pth",
+    "source_checkpoint": "C:\\Users\\Administrator\\Documents\\Models\\spoken-command-recognition\\checkpoints\\model_v2.2\\CommandSense_v2.2.pth",
     "notes": "Post-hoc temperature scaling and confidence thresholding. The logits stay raw in the exported ONNX graph: T and tau are applied by the Python runtime so that the threshold can be changed without re-export."
 }

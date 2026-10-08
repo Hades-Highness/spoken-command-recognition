@@ -11,6 +11,10 @@ ONNX_DIR = BASE_DIR / "onnx"          # optional: standalone .onnx files
 REPORTS_DIR = BASE_DIR / "reports"
 CONFIG_DIR = BASE_DIR / "configs"
 LABELS_PATH = CONFIG_DIR / "labels.json"
+# Calibration payloads (the fitted T and tau) are versioned configuration, not
+# weights: they live here so they can be reviewed, diffed and shipped with the
+# code instead of sitting in the git-ignored checkpoints/ tree.
+CALIBRATION_DIR = CONFIG_DIR / "calibration"
 
 # ---------------------------------------------------------------------------
 # Audio settings
@@ -106,9 +110,11 @@ def ensure_version_dirs(version: str = MODEL_VERSION):
 def calibration_path(version: str = MODEL_VERSION, directory=None) -> Path:
     """Path of the JSON file holding the fitted temperature and threshold.
 
-    Defaults to ``checkpoints/model_<version>/`` (a deployment artifact, next to
-    the weights); pass ``directory`` to write it elsewhere, e.g. inside a report
-    folder.
+    Defaults to ``configs/calibration/``: the payload is a few hundred bytes of
+    versioned configuration, so it is committed with the code and reviewed in a
+    diff instead of sitting in the git-ignored ``checkpoints/`` tree. Pass
+    ``directory`` to write it elsewhere, e.g. a scratch folder for a run whose
+    result must never be served.
     """
-    base = Path(directory) if directory is not None else checkpoint_dir(version)
+    base = Path(directory) if directory is not None else CALIBRATION_DIR
     return base / f"{MODEL_NAME}_calibration_{version}.json"

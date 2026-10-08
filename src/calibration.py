@@ -517,10 +517,18 @@ def save_calibration(
 
 
 def resolve_calibration_file(version: str = MODEL_VERSION) -> Optional[Path]:
-    """Return the first existing calibration file for ``version``, if any."""
+    """Return the first existing calibration file for ``version``, if any.
+
+    ``configs/calibration/`` wins: it is the canonical, version-controlled home
+    of the payload (``CommandSense_calibration_<version>.json``).
+    ``checkpoints/model_<version>/`` is still probed afterwards so a checkout
+    that predates the move keeps working unchanged. ``None`` means no file is
+    available anywhere; callers then keep the configured defaults (raw logits,
+    no confidence rejection) instead of raising.
+    """
     for candidate in (
         calibration_path(version),
-        Path(checkpoint_dir(version)) / f"{MODEL_NAME}_calibration_{version}.json",
+        checkpoint_dir(version) / f"{MODEL_NAME}_calibration_{version}.json",
     ):
         if candidate.exists():
             return candidate
@@ -531,7 +539,11 @@ def load_calibration(path=None, version: str = MODEL_VERSION) -> dict:
     """Load the calibration metadata, or ``{}`` when no usable file exists.
 
     Missing keys are tolerated downstream, so a partially written file cannot
-    crash the server: callers fall back to the configured defaults.
+    crash the server: callers fall back to the configured defaults. The same
+    holds for a file that cannot be read at all, a truncated one (``OSError``),
+    an invalid one (``json.JSONDecodeError``) or one written in an encoding
+    other than UTF-8 (``UnicodeDecodeError``): ``{}`` comes back and nothing
+    raises.
     """
     if path is None:
         path = resolve_calibration_file(version)
@@ -543,7 +555,7 @@ def load_calibration(path=None, version: str = MODEL_VERSION) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 

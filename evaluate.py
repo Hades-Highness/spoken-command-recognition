@@ -15,9 +15,10 @@ Artifacts written to ``reports/model_v2.2/``::
     coverage_vs_accuracy_v2.2.png   coverage / retained accuracy / FRR / FAR vs tau
     confusion_matrix_v2.2.png       37x37 confusion matrix of the evaluation split
 
-The deployment artifact read by ``src/inference.py`` is written to
-``checkpoints/model_v2.2/CommandSense_calibration_v2.2.json`` (an archival copy
-also lands in the report folder).
+The deployment artifact read by ``src/inference.py`` and ``app.py`` is written to
+``configs/calibration/CommandSense_calibration_v2.2.json``: it is versioned
+configuration rather than a weight, so it is kept out of both the report folder
+and the git-ignored ``checkpoints/`` tree.
 
 Like ``train.py``, an interrupted run still writes what it has, under an
 ``_interrupted`` file-name suffix, and skips the deployment JSON so a partial fit
@@ -55,6 +56,7 @@ from configs.config import (  # noqa: E402
     SEED,
     THRESHOLD_CRITERION,
     THRESHOLD_MIN_COVERAGE,
+    calibration_path,
     checkpoint_dir,
     ensure_version_dirs,
     reports_dir,
@@ -679,19 +681,18 @@ def main():
         reject_label=REJECT_LABEL,
     )
     if interrupted:
+        partial_path = calibration_path(MODEL_VERSION).with_name(
+            f"{MODEL_NAME}_calibration_{MODEL_VERSION}{suffix}.json"
+        )
         print(
-            "[!] Partial run: the calibration JSON is archived in the report folder only,\n"
-            "    so a half-fitted temperature is never served by src/inference.py."
+            "[!] Partial run: the calibration JSON is written as\n"
+            f"    '{partial_path}' only, so a half-fitted temperature is never\n"
+            "    served by src/inference.py."
         )
-        calibration.save_calibration(
-            metadata, path=os.path.join(out_dir, f"calibration_{MODEL_VERSION}{suffix}.json")
-        )
+        calibration.save_calibration(metadata, path=partial_path)
     else:
         json_path = calibration.save_calibration(metadata)
         print(f"[+] Saved {json_path}  <- loaded by app.py and src/inference.py")
-        archive_path = os.path.join(out_dir, f"calibration_{MODEL_VERSION}.json")
-        calibration.save_calibration(metadata, path=archive_path)
-        print(f"[+] Saved {archive_path}")
     print(
         "[*] T and tau are applied to the raw logits at inference time; the ONNX graph "
         "itself stays raw-logit."

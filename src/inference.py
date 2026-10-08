@@ -22,6 +22,9 @@ prediction also carries a confidence-threshold decision: when the calibrated
 top-1 probability stays below ``tau``, the served label becomes the reject label
 (``REJECT_LABEL``) and ``is_low_confidence`` is set.
 
+The payload is discovered at start-up, ``configs/calibration/`` first
+(``CommandSense_calibration_v2.2.json``), then the version's checkpoint folder.
+
 Safety fallback: when no calibration file can be read - absent, unreadable or
 holding values the runtime cannot apply - the inferencer falls back on
 ``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead
@@ -144,10 +147,12 @@ class CommandInferencer:
         """Load ``T``/``tau`` from the version's calibration JSON.
 
         The canonical file is
-        ``checkpoints/model_v2.2/CommandSense_calibration_v2.2.json`` (see
+        ``configs/calibration/CommandSense_calibration_v2.2.json`` (see
         :func:`configs.config.calibration_path`), which is resolved here
-        automatically; a calibration-only release such as v2.2 also accepts the
-        calibration file of ``BASE_MODEL_VERSION`` when it has none of its own.
+        automatically; the version's checkpoint folder is still probed as a
+        legacy location, and a calibration-only release such as v2.2 also accepts
+        the calibration file of ``BASE_MODEL_VERSION`` when it has none of its
+        own.
 
         Nothing in this method can raise. An absent, unreadable, unparsable or
         semantically unusable file leaves the defaults from ``configs/config.py``

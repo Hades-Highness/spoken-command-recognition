@@ -33,7 +33,7 @@ except Exception as exc:  # missing checkpoint, missing labels, ...
 BACKENDS = ["ONNX", "PyTorch (.pth)"] if (inferencer and "onnx" in inferencer.available_backends) \
     else ["PyTorch (.pth)"]
 
-# The fitted values come from checkpoints/model_v2.2/*_calibration_v2.2.json; a
+# The fitted values come from configs/calibration/*_calibration_v2.2.json; a
 # missing or partial file leaves the configured defaults in place.
 INITIAL_TAU = (
     float(inferencer.confidence_threshold) if inferencer else float(DEFAULT_CONFIDENCE_THRESHOLD)

@@ -137,8 +137,9 @@ def embed_calibration_metadata(onnx_path: str, version: str = MODEL_VERSION):
     metadata = resolve_calibration(version)
     if not metadata:
         print(
-            "[!] No calibration file found, so the export carries no T/tau metadata. "
-            "Run evaluate.py first; the runtime then falls back on the defaults."
+            "[!] No calibration file found in configs/calibration/, so the export carries "
+            "no T/tau metadata. Run evaluate.py first; the runtime then falls back on the "
+            "defaults."
         )
         return
 
