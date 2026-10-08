@@ -23,12 +23,24 @@ LibriSpeech sources.
 dataset then serves the pre-computed ``[3, n_mels, frames]`` features produced by
 :class:`src.models.AudioFeatureExtractor`. Those features are derived from the
 same int16 cache, so evaluation and training see identical inputs.
+
+Dataset *provisioning* is centralized here too. Before anything is indexed or
+cached, :func:`ensure_speech_commands` and :func:`ensure_librispeech` make sure
+the raw ``.tar.gz`` archives have been downloaded (with ``aria2c`` when it is on
+``PATH``, otherwise ``urllib``) and extracted under ``./data/``. The helpers check
+their target directory first, so every entry point is idempotent and no caller
+(``train.py``, ``evaluate.py``) has to know where the bytes come from.
 """
 
 import gc
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tarfile
+import urllib.request
+from urllib.parse import urlparse
 
 import torch
 from torch.utils.data import Dataset
@@ -43,6 +55,33 @@ from src.utils import load_audio_file, prepare_waveform  # noqa: E402
 
 VALID_SUBSETS = ("training", "validation", "testing")
 
+# ---------------------------------------------------------------------------
+# Centralized dataset provisioning
+# ---------------------------------------------------------------------------
+# Upstream archives. Speech Commands is a single tarball; LibriSpeech ships one
+# archive per subset (dev-clean, train-clean-100, ...).
+SPEECH_COMMANDS_URL = "https://download.tensorflow.org/data/speech_commands_v0.02.tar.gz"
+LIBRISPEECH_URL_TEMPLATE = "https://www.openslr.org/resources/12/{subset}.tar.gz"
+
+# Extraction roots. Both archives already carry their own top-level directory, so
+# extracting Speech Commands under ``./data/SpeechCommands`` and LibriSpeech under
+# ``./data`` reproduces exactly the layout torchaudio expects with download=False:
+#   data/SpeechCommands/speech_commands_v0.02   (SPEECHCOMMANDS)
+#   data/LibriSpeech/<subset>                   (LIBRISPEECH)
+SPEECH_COMMANDS_ROOT = os.path.join(str(DATA_DIR), "SpeechCommands")
+SPEECH_COMMANDS_DIR = os.path.join(SPEECH_COMMANDS_ROOT, "speech_commands_v0.02")
+LIBRISPEECH_ROOT = os.path.join(str(DATA_DIR), "LibriSpeech")
+
+# LibriSpeech subset backing the ``_unknown_`` rejection samples for each Speech
+# Commands split: training uses the large clean-100 set, validation/testing reuse
+# the small dev-clean set.
+LIBRISPEECH_SUBSETS = ("dev-clean", "train-clean-100")
+LIBRISPEECH_SPLIT_BY_SUBSET = {
+    "training": "train-clean-100",
+    "validation": "dev-clean",
+    "testing": "dev-clean",
+}
+
 # Containers the loader understands. Both are decoded natively by
 # torchaudio/soundfile; keeping the set explicit lets directory scans stay in
 # sync with the background-noise and LibriSpeech sources.
@@ -52,6 +91,139 @@ SUPPORTED_AUDIO_EXTENSIONS = (".wav", ".flac")
 # (see ``src/transforms.py``) to restore the [-1, 1] scale.
 INT16_SCALE = 32767.0
 INT16_NORMALIZER = 32768.0
+
+
+def _download_with_urllib(url: str, destination: str) -> None:
+    """Single-connection fallback used when ``aria2c`` is unavailable.
+
+    Standard-library :func:`urllib.request.urlretrieve` with a ``tqdm`` progress
+    bar so the fallback is not noticeably worse to watch than ``aria2c``.
+    """
+    progress = {"bar": None}
+
+    def _hook(blocks: int, block_size: int, total: int) -> None:
+        if progress["bar"] is None:
+            total = total if total and total > 0 else None
+            progress["bar"] = tqdm(
+                total=total,
+                unit="B",
+                unit_scale=True,
+                desc=os.path.basename(destination),
+            )
+        progress["bar"].update(block_size)
+
+    try:
+        urllib.request.urlretrieve(url, destination, reporthook=_hook)
+    finally:
+        if progress["bar"] is not None:
+            progress["bar"].close()
+
+
+def _extract_archive(archive_path: str, output_dir: str) -> None:
+    """Extract a ``.tar.gz``/``.tgz`` archive into ``output_dir`` in place."""
+    if not archive_path.endswith((".tar.gz", ".tgz")):
+        return
+
+    print(f"[*] Extracting {os.path.basename(archive_path)} -> {output_dir}")
+    with tarfile.open(archive_path, "r:gz") as tar:
+        try:
+            # Python >= 3.12 requires an explicit extraction filter (and warns
+            # otherwise); ``data`` is the safe default for trusted datasets.
+            tar.extractall(output_dir, filter="data")
+        except TypeError:
+            # Older interpreters do not know the ``filter`` keyword.
+            tar.extractall(output_dir)
+
+
+def _download_archive(url: str, output_dir: str) -> str:
+    """Download ``url`` into ``output_dir`` and extract the ``.tar.gz`` there.
+
+    ``aria2c -x 16 -s 16 -d <output_dir> <url>`` is preferred because the 16
+    parallel connections saturate the link far better than a single stream; when
+    ``aria2c`` is missing (or fails) the download degrades to
+    :func:`_download_with_urllib`. The archive is kept on disk so reruns can skip
+    the transfer, and the ``.tar.gz`` is extracted immediately afterwards.
+
+    Returns the path of the downloaded archive.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.basename(urlparse(url).path)
+    archive_path = os.path.join(output_dir, filename)
+
+    if os.path.isfile(archive_path):
+        print(f"[=] Archive already present, skipping download: {archive_path}")
+    else:
+        aria2c = shutil.which("aria2c")
+        downloaded = False
+        if aria2c:
+            print(f"[*] aria2c ({aria2c}) downloading {url}")
+            try:
+                subprocess.run(
+                    [aria2c, "-x", "16", "-s", "16", "-d", output_dir, url],
+                    check=True,
+                )
+                downloaded = True
+            except (subprocess.CalledProcessError, OSError) as exc:
+                print(f"[!] aria2c failed ({exc}); falling back to urllib.")
+        else:
+            print("[*] aria2c not found on PATH; using the urllib fallback.")
+
+        if not downloaded:
+            print(f"[*] Downloading {url} -> {archive_path}")
+            _download_with_urllib(url, archive_path)
+
+    _extract_archive(archive_path, output_dir)
+    return archive_path
+
+
+def ensure_speech_commands() -> str:
+    """Return ``data/SpeechCommands/speech_commands_v0.02``, fetching it if absent.
+
+    Idempotent: checks the target directory before touching the network, so a
+    second call is a no-op.
+    """
+    if os.path.isdir(SPEECH_COMMANDS_DIR):
+        print(f"[=] Speech Commands already present: {SPEECH_COMMANDS_DIR}")
+        return SPEECH_COMMANDS_DIR
+
+    print("[*] Speech Commands v0.02 not found; downloading (~2.3 GB)...")
+    _download_archive(SPEECH_COMMANDS_URL, SPEECH_COMMANDS_ROOT)
+
+    if not os.path.isdir(SPEECH_COMMANDS_DIR):
+        raise RuntimeError(
+            f"Speech Commands extraction did not produce '{SPEECH_COMMANDS_DIR}'. "
+            "Check the archive and the ./data/ tree before retrying."
+        )
+    return SPEECH_COMMANDS_DIR
+
+
+def ensure_librispeech(subset: str = "train-clean-100") -> str:
+    """Return ``data/LibriSpeech/<subset>``, fetching the split if absent.
+
+    Idempotent: checks the target directory before touching the network. The
+    archive is downloaded into ``./data`` and extracted there, which yields the
+    ``data/LibriSpeech/<subset>`` path torchaudio's ``LIBRISPEECH`` walks.
+    """
+    if subset not in LIBRISPEECH_SUBSETS:
+        raise ValueError(
+            f"Unsupported LibriSpeech subset '{subset}'; expected one of "
+            f"{LIBRISPEECH_SUBSETS}."
+        )
+
+    target = os.path.join(LIBRISPEECH_ROOT, subset)
+    if os.path.isdir(target):
+        print(f"[=] LibriSpeech '{subset}' already present: {target}")
+        return target
+
+    print(f"[*] LibriSpeech '{subset}' not found; downloading into ./data/...")
+    _download_archive(LIBRISPEECH_URL_TEMPLATE.format(subset=subset), str(DATA_DIR))
+
+    if not os.path.isdir(target):
+        raise RuntimeError(
+            f"LibriSpeech extraction did not produce '{target}'. Check the "
+            "archive and the ./data/ tree before retrying."
+        )
+    return target
 
 
 def quantize_int16(audio: torch.Tensor) -> torch.Tensor:
@@ -94,8 +266,13 @@ class SpeechCommandsDataset(Dataset):
         subset: str = "training",
         cache_in_ram: bool = True,
         return_audio: bool = True,
+        split: str = None,
     ):
         super().__init__()
+        # ``split`` is an accepted alias for ``subset`` (torchaudio's own naming);
+        # callers may use either keyword.
+        if split is not None:
+            subset = split
         if subset not in VALID_SUBSETS:
             raise ValueError(f"subset must be one of {VALID_SUBSETS}, got '{subset}'.")
 
@@ -105,11 +282,18 @@ class SpeechCommandsDataset(Dataset):
         # pre-computed feature contract with return_audio=False.
         self.return_audio = return_audio
 
+        # Centralized, idempotent provisioning. Both datasets are downloaded and
+        # extracted under ./data/ *before* indexing or caching, so no split can be
+        # built from a half-present tree.
+        self.librispeech_subset = LIBRISPEECH_SPLIT_BY_SUBSET[subset]
+        ensure_speech_commands()
+        ensure_librispeech(self.librispeech_subset)
+
         print(f"[*] Indexing '{subset}' split from disk...")
         self.raw_dataset = torchaudio.datasets.SPEECHCOMMANDS(
             root=str(DATA_DIR),
             url="speech_commands_v0.02",
-            download=True,
+            download=False,
             subset=subset,
         )
 
@@ -205,12 +389,10 @@ class SpeechCommandsDataset(Dataset):
     # -------------------------------------------------- rejection class sources
     def _generate_extra_samples(self):
         """Generates _silence_ and _unknown_ samples using real audio sources."""
-        base_dir = os.path.join(DATA_DIR, "SpeechCommands", "speech_commands_v0.02")
-        bg_dir = os.path.join(base_dir, "_background_noise_")
-
         num_extra_target = int(len(self.raw_dataset) * 0.05)  # ~5% of split size
 
         # 1. Inject _silence_ samples (split noise sources to prevent leakage)
+        bg_dir = os.path.join(SPEECH_COMMANDS_DIR, "_background_noise_")
         if not os.path.exists(bg_dir):
             raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
 
@@ -242,14 +424,12 @@ class SpeechCommandsDataset(Dataset):
             silence_count += 1
 
         # 2. Inject _unknown_ samples from LibriSpeech (real OOV speech)
-        ls_url = (
-            "dev-clean" if self.subset in ("validation", "testing") else "train-clean-100"
-        )
+        ls_subset = self.librispeech_subset
         try:
             librispeech_ds = torchaudio.datasets.LIBRISPEECH(
                 root=str(DATA_DIR),
-                url=ls_url,
-                download=True,
+                url=ls_subset,
+                download=False,
             )
 
             indices = list(range(len(librispeech_ds)))
@@ -268,7 +448,7 @@ class SpeechCommandsDataset(Dataset):
 
         except Exception as e:
             raise RuntimeError(
-                f"_unknown_ samples require LibriSpeech ({ls_url}) but loading "
+                f"_unknown_ samples require LibriSpeech '{ls_subset}' but loading "
                 f"failed: {e}. Refusing to fall back to synthetic noise, which "
                 "would silently make the rejection class meaningless."
             ) from e

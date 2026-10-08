@@ -224,10 +224,12 @@ def main():
     print(f"[*] Hardware device: {device}")
 
     print("\n[*] Loading Training Dataset into RAM...")
-    train_dataset = SpeechCommandsDataset(subset="training", cache_in_ram=True)
+    # Download, extraction and RAM caching all live in src/dataset.py; train.py
+    # only asks for the split it needs and inherits an idempotent data pipeline.
+    train_dataset = SpeechCommandsDataset(split="training", cache_in_ram=True)
 
     print("\n[*] Loading Validation Dataset into RAM...")
-    val_dataset = SpeechCommandsDataset(subset="validation", cache_in_ram=True)
+    val_dataset = SpeechCommandsDataset(split="validation", cache_in_ram=True)
 
     print("\n[+] Datasets cached! Initializing DataLoaders...")
     # The v3.0 cache is int16 audio, so a batch is small; pinning it lets the
