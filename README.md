@@ -115,6 +115,8 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 │   ├── inference.py              # Dual-backend (ONNX & PyTorch) inferencer applying T and tau
 │   ├── models.py                 # AudioFeatureExtractor + ResidualBlock + CommandSense
 │   └── utils.py                  # Audio loading and preprocessing (single source of truth)
+├── test/
+│   └── test_calibration_smoke.py  # Lightweight v2.2 evaluation smoke test (no dataset required)
 ├── app.py                        # Interactive Gradio Web UI with a live tau slider
 ├── evaluate.py                   # Metrics, classification report, calibration fit and tau sweep
 ├── export_onnx.py                # PyTorch to ONNX exporter with strict shape validation
