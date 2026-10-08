@@ -1,19 +1,17 @@
 """Export the deployment graph to ONNX and stamp the calibration onto it.
 
-``CommandSense v2.2`` is a calibration-only release: it reuses the v2.1 weights and
-adds no layer, so the graph it exports is exactly the v2.1 graph. Raw logits stay
-raw inside ONNX - ``T`` and ``tau`` are applied by ``src/inference.py`` at runtime,
-which is why changing the threshold never requires a re-export. What v2.2 does add
-to the file is *documentation*: the fitted temperature, the chosen threshold and
-the calibration quality are written into ``metadata_props`` under the
-``commandsense.calibration.`` namespace.
+``CommandSense v3.0`` trains its own weights and fits its own temperature ``T`` and
+confidence threshold ``tau``, so one ``MODEL_VERSION`` keys every artifact of the
+release. Raw logits stay raw inside ONNX - ``T`` and ``tau`` are applied by
+``src/inference.py`` at runtime, which is why changing the threshold never
+requires a re-export. What the export adds to the file is *documentation*: the
+fitted temperature, the chosen threshold and the calibration quality are written
+into ``metadata_props`` under the ``commandsense.calibration.`` namespace.
 
 Resolution order for the checkpoint being exported:
 
-1. ``checkpoints/model_v2.2/<MODEL_NAME>_v2.2.pth``  (only if a future release
-   really trains one)
-2. ``checkpoints/model_v2.1/<MODEL_NAME>_v2.1.pth``  (the weights v2.2 reuses)
-3. ``checkpoints/<MODEL_NAME>_<version>.pth``        (legacy layout)
+1. ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth``  (canonical layout)
+2. ``checkpoints/<MODEL_NAME>_<version>.pth``                 (legacy layout)
 
 Run with:  python export_onnx.py
 """
@@ -25,7 +23,6 @@ import onnx
 import torch
 
 from configs.config import (
-    BASE_MODEL_VERSION,
     CHECKPOINT_DIR,
     MODEL_NAME,
     MODEL_VERSION,
@@ -50,50 +47,36 @@ OPSET_VERSION = 17
 
 
 def resolve_checkpoint(version=MODEL_VERSION):
-    """Return ``(path, version)`` of the weights to export, canonical layout first."""
+    """Return the path of the weights to export, canonical layout first."""
     candidates = [
-        (checkpoint_dir(version) / f"{MODEL_NAME}_{version}.pth", version),
-        (
-            checkpoint_dir(BASE_MODEL_VERSION) / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.pth",
-            BASE_MODEL_VERSION,
-        ),
-        (CHECKPOINT_DIR / f"{MODEL_NAME}_{version}.pth", version),
+        checkpoint_dir(version) / f"{MODEL_NAME}_{version}.pth",
+        CHECKPOINT_DIR / f"{MODEL_NAME}_{version}.pth",
     ]
-    for candidate, resolved_version in candidates:
+    for candidate in candidates:
         if os.path.exists(candidate):
-            return str(candidate), resolved_version
-    return None, None
+            return str(candidate)
+    return None
 
 
 def resolve_calibration(version=MODEL_VERSION):
     """Return the calibration metadata of the deployed release, or ``{}``."""
-    metadata = calibration.load_calibration(version=version)
-    if not metadata and version != BASE_MODEL_VERSION:
-        metadata = calibration.load_calibration(version=BASE_MODEL_VERSION)
-    return metadata
+    return calibration.load_calibration(version=version)
 
 def export_to_onnx():
-    checkpoint_path, weights_version = resolve_checkpoint()
+    checkpoint_path = resolve_checkpoint()
     if checkpoint_path is None:
         print(
             f"[!] Error: no checkpoint found at "
-            f"'{checkpoint_dir(MODEL_VERSION)}/{MODEL_NAME}_{MODEL_VERSION}.pth' nor at "
-            f"'{checkpoint_dir(BASE_MODEL_VERSION)}/{MODEL_NAME}_{BASE_MODEL_VERSION}.pth'."
+            f"'{checkpoint_dir(MODEL_VERSION)}/{MODEL_NAME}_{MODEL_VERSION}.pth'."
         )
         return
 
-    if weights_version != MODEL_VERSION:
-        print(
-            f"[i] {MODEL_VERSION} is a calibration-only release, so the {weights_version} "
-            "graph is re-exported with the fitted T/tau attached as metadata."
-        )
     print(f"[*] Exporting weights <- {checkpoint_path}")
 
     # The graph is written next to the checkpoint it comes from, which is also
-    # where src/inference.py looks for it when it falls back on
-    # BASE_MODEL_VERSION.
+    # where src/inference.py looks for it.
     onnx_path = os.path.join(
-        os.path.dirname(checkpoint_path), f"{MODEL_NAME}_{weights_version}.onnx"
+        os.path.dirname(checkpoint_path), f"{MODEL_NAME}_{MODEL_VERSION}.onnx"
     )
 
     device = torch.device("cpu")

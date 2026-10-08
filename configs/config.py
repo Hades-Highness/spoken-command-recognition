@@ -47,15 +47,11 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Model & versioning
 # ---------------------------------------------------------------------------
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v2.2"
-# v2.2 is a post-hoc calibration release: it adds no parameters and never
-# retrains, so its runtime weights are the v2.1 checkpoint. BASE_MODEL_VERSION
-# is the version whose .pth/.onnx files v2.2 loads when its own folder is empty.
-BASE_MODEL_VERSION = "v2.1"
+MODEL_VERSION = "v3.0"
 NUM_CLASSES = 37
 
 # ---------------------------------------------------------------------------
-# Confidence calibration (v2.2)
+# Confidence calibration (T + tau)
 # ---------------------------------------------------------------------------
 # Temperature scaling (Guo et al., 2017) divides the logits by a single scalar
 # T > 0 fitted on the held-out validation split. The confidence threshold tau
@@ -69,8 +65,8 @@ TEMPERATURE_GRID = (0.05, 20.0)        # (min, max) clamp for the fitted T
 # Safety fallbacks used when no calibration file can be read (absent, unreadable
 # or holding values the runtime cannot apply). T = 1.0 serves the raw logits
 # unchanged and tau = 0.0 can never reject a clip, so a missing
-# CommandSense_calibration_v2.2.json degrades to exactly the v2.1 decision rule
-# instead of silently dropping predictions or crashing the server.
+# CommandSense_calibration_<MODEL_VERSION>.json degrades to the uncalibrated
+# decision rule instead of silently dropping predictions or crashing the server.
 DEFAULT_TEMPERATURE = 1.0              # T used when no calibration file exists
 DEFAULT_CONFIDENCE_THRESHOLD = 0.0     # tau used when no calibration file exists
 CONFIDENCE_THRESHOLD_RANGE = (0.0, 1.0)
@@ -97,8 +93,8 @@ def reports_dir(version: str = MODEL_VERSION) -> Path:
 def ensure_version_dirs(version: str = MODEL_VERSION):
     """Create (and return) the checkpoint and report folders of ``version``.
 
-    Calibration-only versions such as v2.2 ship no weights of their own, so
-    their folders do not exist until the first artifact is written.
+    The folders do not exist until the first artifact of that version is
+    written, so callers can ask for them unconditionally.
     """
     checkpoints = checkpoint_dir(version)
     reports = reports_dir(version)

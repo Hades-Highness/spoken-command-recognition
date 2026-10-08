@@ -29,6 +29,7 @@ from configs.config import (  # noqa: E402
 )
 from src.dataset import SpeechCommandsDataset  # noqa: E402
 from src.models import CommandSense  # noqa: E402
+from src.transforms import AudioToThreeChannelMel  # noqa: E402
 
 
 def set_seed(seed: int = SEED) -> None:
@@ -153,13 +154,24 @@ def save_reports(history, model_name, model_version, suffix=""):
     print(f"[+] Saved {history_path}")
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
+def train_one_epoch(
+    model, dataloader, criterion, optimizer, scaler, device, feature_extractor
+):
     model.train()
+    # train() mode turns on the dynamic SpecAugment inside the GPU front-end.
+    feature_extractor.train()
     running_loss, correct, total = 0.0, 0, 0
 
     pbar = tqdm(dataloader, desc="Training Batch", leave=False)
-    for features, targets in pbar:
-        features, targets = features.to(device), targets.to(device)
+    for waveforms, targets in pbar:
+        # The v3.0 dataset serves pinned int16 [B, 1, T] audio; the 3-channel
+        # features are then built on the accelerator.
+        waveforms = waveforms.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        with torch.no_grad():
+            features = feature_extractor(waveforms)
+
         optimizer.zero_grad()
 
         with autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
@@ -183,12 +195,16 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device):
+def evaluate(model, dataloader, criterion, device, feature_extractor):
     model.eval()
+    # eval() mode disables SpecAugment so validation features stay deterministic.
+    feature_extractor.eval()
     running_loss, correct, total = 0.0, 0, 0
 
-    for features, targets in dataloader:
-        features, targets = features.to(device), targets.to(device)
+    for waveforms, targets in dataloader:
+        waveforms = waveforms.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        features = feature_extractor(waveforms)
         outputs = model(features)
         loss = criterion(outputs, targets)
 
@@ -214,12 +230,17 @@ def main():
     val_dataset = SpeechCommandsDataset(subset="validation", cache_in_ram=True)
 
     print("\n[+] Datasets cached! Initializing DataLoaders...")
+    # The v3.0 cache is int16 audio, so a batch is small; pinning it lets the
+    # host-to-device copy overlap with the previous step's compute. Pinned memory
+    # is a CUDA feature, so it stays off on CPU-only hosts (where it only warns).
+    pin_memory = device.type == "cuda"
     generator = torch.Generator().manual_seed(SEED)
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
+        pin_memory=pin_memory,
         generator=generator,
     )
     val_loader = DataLoader(
@@ -227,9 +248,15 @@ def main():
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
+        pin_memory=pin_memory,
     )
 
     save_labels(train_dataset.labels)
+
+    # GPU-side 3-channel front-end (Log-Mel + Delta + Delta-Delta) with dynamic
+    # SpecAugment. The dataset no longer caches spectrograms, so this module is
+    # what turns a pinned int16 batch into the [B, 3, 64, 63] model input.
+    feature_extractor = AudioToThreeChannelMel().to(device)
 
     model = CommandSense(
         num_classes=len(train_dataset.labels), in_channels=3
@@ -254,9 +281,17 @@ def main():
     try:
         for epoch in range(1, EPOCHS + 1):
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, scaler, device
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                scaler,
+                device,
+                feature_extractor,
             )
-            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc = evaluate(
+                model, val_loader, criterion, device, feature_extractor
+            )
 
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)

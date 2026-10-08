@@ -41,7 +41,6 @@ from train import set_seed
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from configs.config import (  # noqa: E402
-    BASE_MODEL_VERSION,
     BATCH_SIZE,
     CALIBRATION_BINS,
     CHECKPOINT_DIR,
@@ -71,16 +70,15 @@ EVALUATION_SUBSET = "testing"       # reports every headline number
 
 
 def resolve_checkpoint(version=MODEL_VERSION):
-    """Return the weights to evaluate, falling back on ``BASE_MODEL_VERSION``.
+    """Return the weights of ``version`` to evaluate, or ``None`` when absent.
 
-    v2.2 adds no parameters and never retrains, so its runtime weights are the
-    v2.1 checkpoint; that fallback is what makes the calibration reproducible.
+    v3.0 is a self-contained release that trains its own weights, so only the
+    artifacts of ``version`` are considered - there is no base release to borrow
+    a checkpoint from.
     """
     candidates = [
         checkpoint_dir(version) / f"{MODEL_NAME}_{version}.pth",
-        checkpoint_dir(BASE_MODEL_VERSION) / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.pth",
         CHECKPOINT_DIR / f"{MODEL_NAME}_{version}.pth",
-        CHECKPOINT_DIR / f"{MODEL_NAME}_{BASE_MODEL_VERSION}.pth",
     ]
     for candidate in candidates:
         if os.path.exists(candidate):
@@ -116,7 +114,11 @@ def collect_split_logits(model, device, subset, logit_parts, target_parts):
     split is returned so the caller can verify it before trusting any index.
     """
     print(f"[*] Caching and scoring the '{subset}' split (raw logits)...")
-    dataset = SpeechCommandsDataset(subset=subset, cache_in_ram=True)
+    # evaluate.py scores pre-computed features (legacy contract); training serves
+    # raw int16 audio and extracts features on the GPU via src/transforms.py.
+    dataset = SpeechCommandsDataset(
+        subset=subset, cache_in_ram=True, return_audio=False
+    )
     loader = DataLoader(
         dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS
     )
@@ -327,8 +329,7 @@ def build_report_text(meta, calibration_summary, evaluation_summary, sweep, clas
         f"     CALIBRATION & EVALUATION REPORT ({MODEL_NAME} {MODEL_VERSION})",
         rule,
         "",
-        f"Model version    : {MODEL_VERSION} (post-hoc calibration release)",
-        f"Base weights     : {BASE_MODEL_VERSION} (reused, nothing was retrained)",
+        f"Model version    : {MODEL_VERSION} (trained weights, calibrated post-hoc)",
         f"Checkpoint       : {meta['checkpoint']}",
         f"Device           : {meta['device']}",
         f"Calibration split: '{CALIBRATION_SUBSET}' "
@@ -441,13 +442,10 @@ def main():
     if checkpoint_path is None:
         print(
             f"[!] No checkpoint found at '{checkpoint_dir(MODEL_VERSION)}/"
-            f"{MODEL_NAME}_{MODEL_VERSION}.pth' nor at '{checkpoint_dir(BASE_MODEL_VERSION)}/"
-            f"{MODEL_NAME}_{BASE_MODEL_VERSION}.pth'. Download the release asset or run train.py."
+            f"{MODEL_NAME}_{MODEL_VERSION}.pth'. Download the release asset or run train.py."
         )
         return
     print(f"[*] Loading model checkpoint: {checkpoint_path}")
-    if MODEL_VERSION not in os.path.basename(checkpoint_path):
-        print(f"[i] {MODEL_VERSION} ships no weights of its own: reusing {BASE_MODEL_VERSION}.")
     checkpoint_reference = os.path.relpath(
         checkpoint_path, os.path.dirname(__file__)
     ).replace(os.sep, "/")
