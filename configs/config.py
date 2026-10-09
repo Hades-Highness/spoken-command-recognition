@@ -57,11 +57,18 @@ SILENCE_LABEL = "_silence_"
 SILENCE_CLASS_INDEX = 0
 
 # Waveform level (applied on the normalized [-1, 1] audio).
-PITCH_SHIFT_PROB = 0.5                    # per-clip probability of a shift
-PITCH_SHIFT_SEMITONES = (-2, -1, 1, 2)    # allowed shifts (0 excluded)
-PITCH_SHIFT_N_FFT = 512                   # phase-vocoder window
+# Pitch shift is the one augmentation whose cost is worth guarding: the
+# torchaudio phase vocoder (AF.pitch_shift) is ~180x more expensive than the
+# cheap STFT-domain shift below, and its cost is almost constant per call
+# (~3.4 s for 8 clips vs ~16.8 s for 256 on CPU), so lowering the probability
+# alone cannot keep an epoch inside budget. "spectral" is therefore the default.
+PITCH_SHIFT_MODE = "spectral"             # "spectral" (fast) | "vocoder" | "off"
+PITCH_SHIFT_PROB = 0.3                    # per-clip probability of a shift
+PITCH_SHIFT_SEMITONES = (-1, 1)           # allowed shifts (0 excluded)
+PITCH_SHIFT_REFERENCE_HZ = 1000.0         # semitone -> STFT-bin anchor (spectral)
+PITCH_SHIFT_N_FFT = 512                   # analysis window (and bin spacing)
 PITCH_SHIFT_BINS_PER_OCTAVE = 12          # 12 -> n_steps counts semitones
-TIME_SHIFT_PROB = 0.5                     # per-clip probability of a roll
+TIME_SHIFT_PROB = 0.5                     # per-batch probability of a roll
 TIME_SHIFT_RATIO = 0.10                   # max shift, as a share of the 1.0 s clip
 
 # Spectral level (SpecAugment, Park et al., 2019). Widths are drawn per clip and
