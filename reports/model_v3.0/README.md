@@ -14,39 +14,46 @@
 ## ★ Model Overview
 
 * **Model Name**: CommandSense v3.0
-* **Architecture**: unchanged from v2.1 / v2.2 — Residual CNN (3 residual stages, `in_conv` + `layer1..3` + `AdaptiveAvgPool2d` + `Dropout(0.3)` + `Linear`) with a three-channel Log-Mel front-end. **1,217,349 parameters** (≈4.87 MB in float32).
-* **Weights**: **newly trained**. v3.0 is an accuracy release, not a calibration release: the network is untouched, but it is trained from scratch for **30 epochs** instead of the 20 used by v1.0–v2.1.
-* **Front-end**: `AudioToThreeChannelMel` (`src/transforms.py`) builds the Log-Mel + Δ + Δ² tensor **on the accelerator**, on the fly, from an `int16` RAM cache. It is no longer part of the dataset.
+* **Architecture**: Residual CNN with three residual stages (`in_conv` + `layer1..3` + `AdaptiveAvgPool2d` + `Dropout(0.3)` + `Linear`), fed by a three-channel Log-Mel front-end. **1,217,349 parameters** (≈4.87 MB in float32).
+* **Weights**: trained from scratch for **30 epochs** on the official speaker-disjoint splits. No pre-trained checkpoint is loaded and no weight is reused.
+* **Front-end**: `AudioToThreeChannelMel` (`src/transforms.py`) builds the Log-Mel + Δ + Δ² tensor **on the accelerator**, on the fly, from the raw `int16` waveforms that the dataset yields.
 * **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions.
 * **Target Classes (37)**: `_silence_`, `_unknown_`, and the 35 command words `backward`, `bed`, `bird`, `cat`, `dog`, `down`, `eight`, `five`, `follow`, `forward`, `four`, `go`, `happy`, `house`, `learn`, `left`, `marvin`, `nine`, `no`, `off`, `on`, `one`, `right`, `seven`, `sheila`, `six`, `stop`, `three`, `tree`, `two`, `up`, `visual`, `wow`, `yes`, `zero`.
 * **Artifacts**: the v3.0 release is a self-contained bundle — `CommandSense_v3.0.pth` (trained weights), `CommandSense_v3.0.onnx` (the same model exported for ONNX Runtime, with `T` and `tau` in its `metadata_props`) and `CommandSense_calibration_v3.0.json` (the fitted calibration, kept in `configs/calibration/` because it is versioned configuration rather than a weight).
-* **Scope**: v3.0 answers *"is the model more accurate?"* with **yes** — 35-command Top-1 gains **+1.7174 points** over v2.2 while both rejection classes improve — and it re-fits the v2.2 confidence machinery on the new weights rather than dropping it.
+* **Scope**: this card documents the v3.0 weights and the calibrated deployment layer fitted on top of them — the `int16` RAM cache, the GPU-side feature extraction, the GPU-native conditional augmentation and the 30-epoch training schedule that produce them, and the temperature `T` and threshold `tau` that serve them. It reports v3.0 in isolation and makes no claim about any other release.
 
 ---
 
-## ★ What v3.0 Changes
+## ★ Technical Innovations
 
-| | v2.2 | v3.0 |
+v3.0 keeps the residual network and rebuilds the data pipeline around it. Four mechanisms define the release, and none of them adds a parameter.
+
+| Mechanism | Implementation | Effect |
 | :--- | :--- | :--- |
-| Weights | 1,217,349 parameters, frozen (copies of v2.1) | 1,217,349 parameters, **retrained** |
-| Training | none (no gradient step is taken) | **30 epochs**, AdamW at `1e-3`, weight decay `1e-4`, batch size 256, no scheduler |
-| Audio in RAM | float32 three-channel spectrograms, pre-computed | **raw `int16` waveforms**, spectrogram built later (~75 % less RAM) |
-| Front-end | CPU, inside the dataset `__getitem__` | **GPU**, `AudioToThreeChannelMel` in `src/transforms.py` |
-| Augmentation | CPU, applied to commands | **GPU-native** (spectral shift, time shift, SpecAugment), **strictly disabled for `_silence_`** |
-| Downloader | plain transfer | **SSL fallback** on `CERTIFICATE_VERIFY_FAILED`, centralized and idempotent provisioning |
-| Val Acc | 94.94 % | **96.36 %** |
-| Test Acc (35 cmd) | 94.1481 % (10,361 / 11,005) | **95.8655 %** (10,550 / 11,005) |
-| Reported confidence | `softmax(logits / T)`, `T = 1.8074` | `softmax(logits / T)`, **`T = 1.3116`** |
-| Rejection | learned classes **plus** `tau* = 0.80` | learned classes **plus** **`tau* = 0.89`** |
-| ONNX graph | raw logits, `T`/`tau` in metadata | raw logits, `T`/`tau` in metadata (unchanged contract) |
+| **`int16` RAM cache** | `src/dataset.py` caches the raw waveform as `torch.int16` — 16,000 samples × 2 bytes ≈ 32 KB per clip — instead of pre-computed float32 spectrograms. | The resident dataset is ≈75 % smaller, so the corpus fits in RAM alongside the model and the batches. |
+| **GPU-side feature extraction** | `AudioToThreeChannelMel` (`src/transforms.py`) builds Log-Mel + Δ + Δ² on the accelerator, on the fly, from the `int16` tensors; the CPU never materialises a spectrogram. | The front-end stays inside the per-batch budget (≈25–30 s per epoch on a single T4 at batch size 256) and cannot drift between training, evaluation and serving. |
+| **GPU-native conditional augmentation** | Spectral shift (STFT-domain `stft → torch.roll → istft`), time shift (`torch.roll`) and dynamic SpecAugment (independent per-clip frequency and time masks, re-drawn every epoch) run per batch, in `train()` mode only, and are **strictly disabled for `_silence_`**. | The spectral shift is ≈180× cheaper than the phase vocoder it replaces, and excluding `_silence_` keeps the reject boundary sharp instead of blurring it. |
+| **Resilient provisioning** | `ensure_speech_commands` / `ensure_librispeech` centralise and idempotently retry the downloads, with a TLS fallback when a CDN chain fails local verification (`CERTIFICATE_VERIFY_FAILED`). | An unattended install completes without a manual workaround, while genuine network errors are still re-raised and stay visible. |
 
-**v3.0 is a bundle, not a single-variable experiment.** Five things move at once — the RAM representation, the location of the front-end, the augmentation strategy, the downloader's TLS behaviour and the epoch budget — so the `+1.7174` point on Top-1 is the **net effect** of the bundle and cannot be attributed to any one of them from this evidence alone. What the bundle does establish is that the pipeline, not the capacity, was the binding constraint: the parameter count is identical to v2.1/v2.2 and the architecture is untouched.
+**These mechanisms act as a bundle.** They are introduced together in a single release, and every metric on this card is the outcome of the combination. Each mechanism is documented separately above, but no per-mechanism accuracy contribution is claimed: isolating any one of them would require a dedicated training run per variant, which was not done.
 
 ---
 
 ## ★ Training Recipe & History
 
-Every version uses the same optimiser and schedule shape (AdamW, `lr = 1e-3`, `weight_decay = 1e-4`, batch size 256, no LR scheduler, cross-entropy). The only training hyperparameter that changes in v3.0 is the length of the run: **30 epochs** against 20 for v1.0–v2.1. `train.py` caches the corpus as `int16` and builds spectrograms on the GPU, so an epoch costs ≈25–30 s on a single T4.
+v3.0 is trained from scratch for **30 epochs** on the official speaker-disjoint splits. `train.py` caches the corpus as `int16` and builds spectrograms on the GPU, so an epoch costs ≈25–30 s on a single T4.
+
+| Hyperparameter | Value |
+| :--- | :--- |
+| Objective | Cross-entropy over 37 classes |
+| Optimiser | AdamW |
+| Learning rate | `1e-3`, constant (no scheduler) |
+| Weight decay | `1e-4` |
+| Batch size | 256 |
+| Epochs | 30 |
+| Seed | `42` (global, set by `set_seed`) |
+| Mixed precision | AMP (`torch.amp.autocast` + `GradScaler`) |
+| Hardware | 1× NVIDIA T4, ≈25–30 s per epoch |
 
 ![Training Curves](training_curves_v3.0.png)
 
@@ -59,7 +66,7 @@ Every version uses the same optimiser and schedule shape (AdamW, `lr = 1e-3`, `w
 
 The best checkpoint of the run is the last one: validation accuracy peaks at **96.3567 %** on epoch 29 (96.1199 % on epoch 30), and validation loss is lowest on the same epoch (0.141437). The curve is still improving slowly at epoch 30 — the last ten epochs buy ≈0.38 points of validation accuracy — so the 30-epoch budget is mildly under-trained rather than over-trained, and the train/val gap stays small (96.53 % vs 96.12 % for accuracy, 0.111 vs 0.149 for loss).
 
-**Note on the two validation numbers.** The history JSON records 96.3567 % (best epoch, training-time validation loader) while the calibration report measures **96.3749 %** on the same 10,979-clip validation split. The two passes differ because the evaluation loader builds its inputs through the dedicated eval path in `src/transforms.py` and re-draws the synthetic `_silence_` / `_unknown_` clips, as described in the v2.2 card. The published headline, **96.36 %**, is the calibration report figure.
+**Note on the two validation numbers.** The history JSON records 96.3567 % (best epoch, training-time validation loader) while the calibration report measures **96.3749 %** on the same 10,979-clip validation split. The two passes differ because the evaluation loader builds its inputs through the dedicated eval path in `src/transforms.py` and re-draws the synthetic `_silence_` / `_unknown_` clips at load time. The headline, **96.36 %**, is the calibration report figure.
 
 ---
 
@@ -85,14 +92,14 @@ The per-class report in [`report_v3.0.txt`](report_v3.0.txt) shows the residual 
 Two caveats on reading this table:
 
 * **The rejection-class recalls are samples, not constants.** The 1,100 `_silence_` / `_unknown_` evaluation clips are not stored on disk — `src/dataset.py` slices them out of the held-out `_background_noise_` recordings and out of LibriSpeech `dev-clean` at load time under the global RNG. Re-running the evaluation with a different seed moves those two cells. The command columns are unaffected.
-* **`Overall` is not comparable across versions** once the class count changes, because the mix of command and rejection clips differs. The comparable columns are 35-command Top-1 and the two recalls.
+* **`Overall` mixes two populations.** It is computed over the command clips plus the rejection clips, so it responds to the composition of the split as much as to raw accuracy. For a pure command metric read the 35-command Top-1; for the reject behaviour read the two per-class recalls.
 
 ---
 
 
 ## ★ Calibration
 
-v3.0 inherits the v2.2 calibration machinery unchanged and re-fits it on the new weights. Nothing about the method is new; what changes is the fitted value and, more interestingly, the **head-room** the method has to work with.
+v3.0 ships a fitted post-hoc calibration: a single scalar temperature `T` fitted on held-out validation data, plus a confidence threshold `tau` that turns the calibrated probability into an accept/reject decision. Both values are produced by `evaluate.py` and stored in `configs/calibration/CommandSense_calibration_v3.0.json`, which the inferencer loads at start-up.
 
 **Temperature scaling** (Guo et al., 2017) rescales the logits `z` with a single scalar `T > 0`:
 
@@ -109,13 +116,13 @@ $$p_i = \frac{\exp(z_i / T)}{\sum_j \exp(z_j / T)}$$
 | | | | ECE | 0.010317 | **0.005332** | **−48.3 %** |
 | | | | MCE | 0.192082 | 0.125716 | −34.5 % |
 
-**The fitted `T` is smaller than v2.2's (1.3116 against 1.8074) because the model needs less correction.** The v2.2 checkpoint starts from `ECE = 0.0260` on the test split; the v3.0 checkpoint starts from `ECE = 0.0103`, roughly two and a half times better calibrated *before* any fitting. That is the expected consequence of a stronger model of identical capacity: it makes fewer confident mistakes, so the logits are already closer to the truth and a smaller scalar suffices. A smaller `T` is therefore a sign of progress, not of a weaker calibration.
+**`T = 1.3116` is a mild correction, and that is the interesting part.** Before any fitting, the raw logits already score `ECE = 0.0103` on the out-of-sample split — a small miscalibration to begin with — so the fitted scalar stays close to `1` and has limited head-room to exploit. `T > 1` still **softens** the distribution, which is the direction an over-confident network needs, so the reported confidence moves closer to the empirical accuracy while not a single prediction changes.
 
 ### - Reliability Diagram
 
 ![Reliability Diagram](calibration_v3.0.png)
 
-Before calibration the reliability curve is already close to the diagonal — unlike v2.1, which sat well below it — and after dividing the logits by `T = 1.3116` the residual gap narrows further, with the maximum calibration error falling from 0.192 to 0.126 on the out-of-sample split. The test ECE falls by **48.3 %** even though `T` was fitted on a different split: with ≈11 k clips and one free parameter there is essentially nothing to overfit, which is why the out-of-sample improvement tracks the in-sample one so closely.
+Before calibration the reliability curve already sits close to the diagonal, and after dividing the logits by `T = 1.3116` the residual gap narrows further, with the maximum calibration error falling from 0.192 to 0.126 on the out-of-sample split. The test ECE falls by **48.3 %** even though `T` was fitted on a different split: with ≈11 k clips and one free parameter there is essentially nothing to overfit, which is why the out-of-sample improvement tracks the in-sample one so closely.
 
 The practical consequence is modest but real: at 90 % confidence the model is now right about 90 % of the time, so the calibrated number can be shown to a user as-is, and the same number is what the confidence threshold operates on.
 
@@ -128,7 +135,7 @@ A clip is answered only when its calibrated top-1 probability reaches `tau`; oth
 
 $$\hat{y} = \begin{cases} \arg\max_i p_i, & \max_i p_i \ge \tau \\ \texttt{\_unknown\_}, & \text{otherwise} \end{cases}$$
 
-`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the coverage floor `THRESHOLD_MIN_COVERAGE = 90 %`. The selected value is **`tau* = 0.89`**, up from `0.80` in v2.2 — a stricter operating point, which makes sense: the model is more accurate and better calibrated, so a higher bar can be demanded before an answer is served.
+`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the coverage floor `THRESHOLD_MIN_COVERAGE = 90 %`. The selected value is **`tau* = 0.89`** — a deliberately strict operating point: the model is accurate and well calibrated, so a high bar can be demanded before an answer is served.
 
 | Metric (testing split, 12,105 clips) | Value |
 | :--- | ---: |
@@ -168,7 +175,7 @@ Every row is measured on the testing split with the calibrated probabilities, so
 | 0.90 | 89.26 % | **99.55 %** | 7.61 % | **10.58 %** |
 | **0.89** | **89.76 %** | **99.48 %** | **7.16 %** | **12.31 %** ← `tau*` |
 
-The sweep sits higher than v2.2's at every row: the threshold-free accuracy is 96.18 % against 94.56 %, and the FAR at the selected point falls from 22.04 % to 12.31 % — the same threshold family operating on a better model. The `0.90` row is very slightly more accurate on retained accuracy (99.55 %) but sits just below the 90 % coverage floor, which is exactly why `min_cost` lands on `0.89`.
+Below `tau = 0.70` the threshold removes very few errors: coverage stays above 95 % but the FAR is still above 30 %, so most of the remaining mistakes are served anyway. The useful range is `0.80–0.90`, where the FAR collapses from 21.60 % to 10.58 % for ≈3.9 points of coverage (93.14 % → 89.26 %). The `0.90` row is very slightly more accurate on retained accuracy (99.55 %) but sits just below the 90 % coverage floor, which is exactly why `min_cost` lands on `0.89`.
 
 ### - Coverage vs Accuracy
 
@@ -202,7 +209,7 @@ Nothing has to be wired by hand: `CommandInferencer` (used by `app.py`) resolves
 
 A startup log line names the file that was actually read, and every response carries the `temperature` and `threshold` in force, so a deployment can always prove which calibration it is serving.
 
-**Fallback.** If the calibration file is absent, unreadable, malformed or holds values the runtime cannot apply (`T <= 0`, `tau` outside `[0, 1]`), the inferencer prints a warning and falls back on `T = 1.0` / `tau = 0.0`. That is the raw-logit decision rule with no low-confidence rejection. **Model weights are different:** the inferencer only loads assets for the configured version (`MODEL_VERSION = "v3.0"`). If neither the matching `.pth` nor `.onnx` file exists, initialization raises an error explaining where to place the versioned release assets; it does not substitute v2.1 or v2.2 weights.
+**Fallback.** If the calibration file is absent, unreadable, malformed or holds values the runtime cannot apply (`T <= 0`, `tau` outside `[0, 1]`), the inferencer prints a warning and falls back on `T = 1.0` / `tau = 0.0`. That is the raw-logit decision rule with no low-confidence rejection. **Model weights are different:** the inferencer only loads assets for the configured version (`MODEL_VERSION = "v3.0"`). If neither the matching `.pth` nor `.onnx` file exists, initialization raises an error explaining where to place the versioned release assets; it does not substitute weights from another version.
 
 The exported ONNX graph keeps emitting raw logits and stores `T` and `tau` in its `metadata_props` under `commandsense.calibration.*`, so the operating point can be changed without re-exporting the model. `src/inference.py` applies `softmax(logits / T)` in Python, identically for the ONNX and PyTorch backends, and `is_low_confidence` distinguishes a threshold rejection from the learned `_unknown_` class.
 
@@ -229,10 +236,10 @@ python evaluate.py   # fits T and tau -> configs/calibration/ + this folder
 
 ## ★ Caveats
 
-* **v3.0 is a bundle.** The RAM representation, the front-end placement, the augmentation strategy, the downloader and the epoch budget all change together. The `+1.7174` points of Top-1 are the net effect; this card does not attribute them to any single change.
-* **The parameter count is identical to v2.1 / v2.2.** No layer was added, removed or resized — the whole gain comes from how the data reaches the model.
-* **Validation split.** The 10,979-clip validation set is the same for every version, but the 1,100 rejection clips inside the splits are re-drawn at load time, so the two rejection-class recalls are samples rather than constants. Re-running the evaluation may move those cells slightly; the command columns will not move.
+* **The mechanisms act as a bundle.** The RAM representation, the front-end placement, the augmentation strategy, the provisioning fallback and the epoch budget are all part of one release. The published metrics are the outcome of the combination; this card does not attribute them to any single mechanism.
+* **The improvement is a pipeline improvement, not a capacity improvement.** The architecture is a plain 1,217,349-parameter residual CNN: no layer was added, removed or resized. What changed is how the data reaches the model.
+* **The rejection clips are drawn at load time.** The 10,979-clip validation split and the 12,105-clip testing split (11,005 commands + 1,100 rejection clips) each contain 1,100 synthetic `_silence_` / `_unknown_` clips that `src/dataset.py` slices out of the held-out recordings rather than storing on disk. The two rejection-class recalls are therefore samples rather than constants: re-running the evaluation with a different seed moves those cells, while the 35 command columns do not move.
 * **The `Val Acc` column vs the calibration report.** The training history records 96.3567 % at its best epoch; the calibration report measures 96.3749 % on the same split through the evaluation path. The headline **96.36 %** follows the report.
 * **The threshold trades coverage for precision, and it loses on net yield.** At `tau* = 0.89` the answers served are 99.48 % correct, but the end-to-end yield of *answered and correct* clips (89.29 %) is below the 96.18 % the threshold-free model scores on every clip. Choose `tau` from the sweep table, not from the headline accuracy.
-* **This card stands alone.** Like every model card in this repository, it is written to be read without the others. Cross-version claims (such as the +1.7174 point gain) are stated in the root `README.md`, where all versions sit in one table.
+* **This card describes v3.0 only.** It is written to be read on its own and makes no claim about any other release: no other version appears in it, and no metric is stated as a delta against one. Comparisons across versions live in the repository's root `README.md`, where every version sits in a single table.
 
