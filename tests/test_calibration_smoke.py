@@ -1,5 +1,6 @@
-"""Throwaway smoke test for the v2.2 evaluate.py helpers (no dataset touched)."""
+"""Throwaway smoke test for the evaluate.py helpers (no dataset touched)."""
 import os
+import sys
 import tempfile
 
 import matplotlib
@@ -7,8 +8,10 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+ 
 import evaluate
-from configs.config import THRESHOLD_CRITERION, THRESHOLD_MIN_COVERAGE
+from configs.config import MODEL_VERSION, THRESHOLD_CRITERION, THRESHOLD_MIN_COVERAGE
 from src import calibration
 
 rng = np.random.default_rng(7)
@@ -88,7 +91,7 @@ print("plots:", sorted(os.listdir(out_dir)))
 metadata = calibration.build_calibration_metadata(
     temperature=temperature,
     confidence_threshold=tau,
-    version="v2.2",
+    version=MODEL_VERSION,
     n_bins=15,
     ece_before=summary["ece_before"],
     ece_after=summary["ece_after"],

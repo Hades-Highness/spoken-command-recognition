@@ -1,0 +1,19 @@
+{
+    "model_name": "CommandSense",
+    "model_version": "v3.0",
+    "created_utc": "2026-10-09T12:19:33Z",
+    "temperature": 1.311633,
+    "confidence_threshold": 0.89,
+    "reject_label": "_unknown_",
+    "n_bins": 15,
+    "ece_before": 0.010317,
+    "ece_after": 0.005332,
+    "nll_before": 0.132331,
+    "nll_after": 0.12749,
+    "nll_before_train": null,
+    "threshold_criterion": "min_cost",
+    "calibration_split": "validation (10979 samples)",
+    "calibration_samples": 10979,
+    "source_checkpoint": "checkpoints/model_v3.0/CommandSense_v3.0.pth",
+    "notes": "Post-hoc temperature scaling and confidence thresholding. The logits stay raw in the exported ONNX graph: T and tau are applied by the Python runtime so that the threshold can be changed without re-export."
+}

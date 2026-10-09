@@ -23,12 +23,14 @@ from configs.config import (  # noqa: E402
     MODEL_VERSION,
     NUM_WORKERS,
     SEED,
+    SILENCE_LABEL,
     WEIGHT_DECAY,
     checkpoint_dir,
     reports_dir,
 )
 from src.dataset import SpeechCommandsDataset  # noqa: E402
 from src.models import CommandSense  # noqa: E402
+from src.transforms import AudioToThreeChannelMel  # noqa: E402
 
 
 def set_seed(seed: int = SEED) -> None:
@@ -153,13 +155,26 @@ def save_reports(history, model_name, model_version, suffix=""):
     print(f"[+] Saved {history_path}")
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
+def train_one_epoch(
+    model, dataloader, criterion, optimizer, scaler, device, feature_extractor
+):
     model.train()
+    # train() mode turns on the dynamic SpecAugment inside the GPU front-end.
+    feature_extractor.train()
     running_loss, correct, total = 0.0, 0, 0
 
     pbar = tqdm(dataloader, desc="Training Batch", leave=False)
-    for features, targets in pbar:
-        features, targets = features.to(device), targets.to(device)
+    for waveforms, targets in pbar:
+        # The v3.0 dataset serves pinned int16 [B, 1, T] audio; the 3-channel
+        # features are then built on the accelerator.
+        waveforms = waveforms.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        # ``targets`` let the front-end skip the '_silence_' clips, which must
+        # never be augmented (see src/transforms.py).
+        with torch.no_grad():
+            features = feature_extractor(waveforms, targets)
+
         optimizer.zero_grad()
 
         with autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
@@ -183,12 +198,18 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device):
+def evaluate(model, dataloader, criterion, device, feature_extractor):
     model.eval()
+    # eval() mode disables SpecAugment so validation features stay deterministic.
+    feature_extractor.eval()
     running_loss, correct, total = 0.0, 0, 0
 
-    for features, targets in dataloader:
-        features, targets = features.to(device), targets.to(device)
+    for waveforms, targets in dataloader:
+        waveforms = waveforms.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+        # eval() already disabled every augmentation inside the front-end; passing
+        # ``targets`` keeps this call site identical to the training loop.
+        features = feature_extractor(waveforms, targets)
         outputs = model(features)
         loss = criterion(outputs, targets)
 
@@ -208,18 +229,25 @@ def main():
     print(f"[*] Hardware device: {device}")
 
     print("\n[*] Loading Training Dataset into RAM...")
-    train_dataset = SpeechCommandsDataset(subset="training", cache_in_ram=True)
+    # Download, extraction and RAM caching all live in src/dataset.py; train.py
+    # only asks for the split it needs and inherits an idempotent data pipeline.
+    train_dataset = SpeechCommandsDataset(split="training", cache_in_ram=True)
 
     print("\n[*] Loading Validation Dataset into RAM...")
-    val_dataset = SpeechCommandsDataset(subset="validation", cache_in_ram=True)
+    val_dataset = SpeechCommandsDataset(split="validation", cache_in_ram=True)
 
     print("\n[+] Datasets cached! Initializing DataLoaders...")
+    # The v3.0 cache is int16 audio, so a batch is small; pinning it lets the
+    # host-to-device copy overlap with the previous step's compute. Pinned memory
+    # is a CUDA feature, so it stays off on CPU-only hosts (where it only warns).
+    pin_memory = device.type == "cuda"
     generator = torch.Generator().manual_seed(SEED)
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=NUM_WORKERS,
+        pin_memory=pin_memory,
         generator=generator,
     )
     val_loader = DataLoader(
@@ -227,9 +255,20 @@ def main():
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=NUM_WORKERS,
+        pin_memory=pin_memory,
     )
 
     save_labels(train_dataset.labels)
+
+    # GPU-side 3-channel front-end (Log-Mel + Delta + Delta-Delta) with dynamic
+    # SpecAugment and conditional waveform augmentation (Pitch/Time shift). The
+    # dataset no longer caches spectrograms, so this module is what turns a pinned
+    # int16 batch into the [B, 3, 64, 63] model input. ``silence_index`` tells it
+    # which label must never be augmented, and it is read straight from the
+    # dataset so it cannot drift from the frozen label order.
+    feature_extractor = AudioToThreeChannelMel(
+        silence_index=train_dataset.label_to_idx[SILENCE_LABEL]
+    ).to(device)
 
     model = CommandSense(
         num_classes=len(train_dataset.labels), in_channels=3
@@ -254,9 +293,17 @@ def main():
     try:
         for epoch in range(1, EPOCHS + 1):
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, scaler, device
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                scaler,
+                device,
+                feature_extractor,
             )
-            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+            val_loss, val_acc = evaluate(
+                model, val_loader, criterion, device, feature_extractor
+            )
 
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
