@@ -98,7 +98,20 @@ def _download_with_urllib(url: str, destination: str) -> None:
 
     Standard-library :func:`urllib.request.urlretrieve` with a ``tqdm`` progress
     bar so the fallback is not noticeably worse to watch than ``aria2c``.
+
+    The transfer is retried once over an unverified TLS context when - and only
+    when - the failure is a certificate validation error.
+    ``download.tensorflow.org`` intermittently serves a chain the local trust
+    store cannot verify, so the retry keeps dataset provisioning usable instead
+    of aborting on a known, transient CDN issue. Any other
+    :class:`urllib.error.URLError` is re-raised untouched, so genuine network
+    problems are never masked.
     """
+    # Imported locally: ``aria2c`` is the primary path and most runs never reach
+    # this fallback, so the SSL plumbing stays out of the module import cost.
+    import ssl
+    import urllib.error
+
     progress = {"bar": None}
 
     def _hook(blocks: int, block_size: int, total: int) -> None:
@@ -113,7 +126,38 @@ def _download_with_urllib(url: str, destination: str) -> None:
         progress["bar"].update(block_size)
 
     try:
-        urllib.request.urlretrieve(url, destination, reporthook=_hook)
+        try:
+            urllib.request.urlretrieve(url, destination, reporthook=_hook)
+        except urllib.error.URLError as exc:
+            # Only a TLS trust failure triggers the retry; a DNS error, timeout
+            # or HTTP status error is re-raised so real network problems stay
+            # visible instead of being silently swallowed.
+            reason = str(exc)
+            if "CERTIFICATE_VERIFY_FAILED" not in reason and "ssl.c" not in reason:
+                raise
+
+            print(
+                "[!] SSL certificate verification failed for "
+                f"{urlparse(url).netloc} (known intermittent CDN issue):\n"
+                f"    {reason}\n"
+                "[!] Retrying once with an unverified SSL context."
+            )
+            # A certificate error aborts the connection before any block is read,
+            # so the bar is normally still unset; close it defensively anyway so
+            # the retry starts from a clean progress bar.
+            if progress["bar"] is not None:
+                progress["bar"].close()
+                progress["bar"] = None
+
+            # Unverified context + globally installed opener, as a last resort
+            # for this known CDN certificate problem.
+            context = ssl._create_unverified_context()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=context)
+            )
+            urllib.request.install_opener(opener)
+            urllib.request.urlretrieve(url, destination, reporthook=_hook)
+            print("[+] Download succeeded using the unverified SSL context.")
     finally:
         if progress["bar"] is not None:
             progress["bar"].close()

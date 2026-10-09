@@ -90,10 +90,65 @@ def test_waveform_standardization_to_int16():
     print("[OK] standardization: mono / 16 kHz / fixed length / int16")
 
 
+def test_waveform_augmentation_is_train_only_and_masked():
+    """eval() is a no-op; in train() only the eligible rows are touched."""
+    from src.transforms import WaveformAugmentation
+
+    torch.manual_seed(0)
+    augmenter = WaveformAugmentation(p_pitch=1.0, p_time=1.0)
+    audio = torch.randn(4, 1, TARGET_SAMPLES) * 0.1
+    mask = torch.tensor([True, False, True, False])
+
+    augmenter.eval()
+    with torch.no_grad():
+        assert torch.equal(augmenter(audio, mask), audio), "eval() must be a no-op"
+
+    augmenter.train()
+    with torch.no_grad():
+        out = augmenter(audio, mask)
+
+    assert tuple(out.shape) == tuple(audio.shape), tuple(out.shape)
+    # Rows flagged False are never touched; rows flagged True always change
+    # because both augmentations are forced on (p_pitch = p_time = 1.0).
+    assert torch.equal(out[~mask], audio[~mask]), "masked-out rows were modified"
+    assert not torch.equal(out[mask], audio[mask]), "eligible rows were left untouched"
+    print("[OK] WaveformAugmentation: eval() no-op, train() only on the mask")
+
+
+def test_silence_clips_are_never_augmented():
+    """train() must leave the '_silence_' rows identical to the eval() features."""
+    torch.manual_seed(0)
+    silence_index = 0  # '_silence_' sorts first in configs/labels.json
+    extractor = AudioToThreeChannelMel(silence_index=silence_index)
+    batch = _dummy_int16_batch()
+    targets = torch.tensor([0, 1, 2, 0, 3, 1, 2, 0], dtype=torch.long)
+    targets = targets[: batch.shape[0]]
+    silence_rows = targets == silence_index
+    assert bool(silence_rows.any()) and bool((~silence_rows).any())
+
+    extractor.eval()
+    with torch.no_grad():
+        reference = extractor(batch, targets)
+
+    extractor.train()
+    with torch.no_grad():
+        augmented = extractor(batch, targets)
+
+    assert torch.equal(
+        augmented[silence_rows], reference[silence_rows]
+    ), "'_silence_' rows changed in train() (waveform and/or SpecAugment leaked)"
+    assert not torch.equal(
+        augmented[~silence_rows], reference[~silence_rows]
+    ), "non-silence rows were not augmented in train()"
+    print("[OK] conditional augmentation: '_silence_' rows untouched in train()")
+
+
 def main():
     test_transform_output_shape()
     test_spec_augment_is_dynamic_and_train_only()
     test_waveform_standardization_to_int16()
+    test_waveform_augmentation_is_train_only_and_masked()
+    test_silence_clips_are_never_augmented()
     print("\n[OK] v3 pipeline smoke test passed")
 
 

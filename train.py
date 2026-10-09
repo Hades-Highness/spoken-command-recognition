@@ -23,6 +23,7 @@ from configs.config import (  # noqa: E402
     MODEL_VERSION,
     NUM_WORKERS,
     SEED,
+    SILENCE_LABEL,
     WEIGHT_DECAY,
     checkpoint_dir,
     reports_dir,
@@ -169,8 +170,10 @@ def train_one_epoch(
         waveforms = waveforms.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
+        # ``targets`` let the front-end skip the '_silence_' clips, which must
+        # never be augmented (see src/transforms.py).
         with torch.no_grad():
-            features = feature_extractor(waveforms)
+            features = feature_extractor(waveforms, targets)
 
         optimizer.zero_grad()
 
@@ -204,7 +207,9 @@ def evaluate(model, dataloader, criterion, device, feature_extractor):
     for waveforms, targets in dataloader:
         waveforms = waveforms.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        features = feature_extractor(waveforms)
+        # eval() already disabled every augmentation inside the front-end; passing
+        # ``targets`` keeps this call site identical to the training loop.
+        features = feature_extractor(waveforms, targets)
         outputs = model(features)
         loss = criterion(outputs, targets)
 
@@ -256,9 +261,14 @@ def main():
     save_labels(train_dataset.labels)
 
     # GPU-side 3-channel front-end (Log-Mel + Delta + Delta-Delta) with dynamic
-    # SpecAugment. The dataset no longer caches spectrograms, so this module is
-    # what turns a pinned int16 batch into the [B, 3, 64, 63] model input.
-    feature_extractor = AudioToThreeChannelMel().to(device)
+    # SpecAugment and conditional waveform augmentation (Pitch/Time shift). The
+    # dataset no longer caches spectrograms, so this module is what turns a pinned
+    # int16 batch into the [B, 3, 64, 63] model input. ``silence_index`` tells it
+    # which label must never be augmented, and it is read straight from the
+    # dataset so it cannot drift from the frozen label order.
+    feature_extractor = AudioToThreeChannelMel(
+        silence_index=train_dataset.label_to_idx[SILENCE_LABEL]
+    ).to(device)
 
     model = CommandSense(
         num_classes=len(train_dataset.labels), in_channels=3

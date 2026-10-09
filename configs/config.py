@@ -39,9 +39,38 @@ BATCH_SIZE = 256
 NUM_WORKERS = 0
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-4
-EPOCHS = 20
+EPOCHS = 30
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ---------------------------------------------------------------------------
+# Conditional augmentation (v3.0): train-only, GPU-side, never on '_silence_'
+# ---------------------------------------------------------------------------
+# Every augmentation below runs on the accelerator, right after the pinned int16
+# batch lands on the GPU, and only while the front-end is in train() mode. The
+# '_silence_' clips are always left untouched: they teach the reject (OOD)
+# boundary from raw background noise, so perturbing them would only blur it.
+SILENCE_LABEL = "_silence_"
+# '_silence_' is index 0 because the dataset sorts its label list and '_' sorts
+# before every letter (see configs/labels.json). train.py overrides this with the
+# dataset's own label_to_idx index, so the two can never drift apart.
+SILENCE_CLASS_INDEX = 0
+
+# Waveform level (applied on the normalized [-1, 1] audio).
+PITCH_SHIFT_PROB = 0.5                    # per-clip probability of a shift
+PITCH_SHIFT_SEMITONES = (-2, -1, 1, 2)    # allowed shifts (0 excluded)
+PITCH_SHIFT_N_FFT = 512                   # phase-vocoder window
+PITCH_SHIFT_BINS_PER_OCTAVE = 12          # 12 -> n_steps counts semitones
+TIME_SHIFT_PROB = 0.5                     # per-clip probability of a roll
+TIME_SHIFT_RATIO = 0.10                   # max shift, as a share of the 1.0 s clip
+
+# Spectral level (SpecAugment, Park et al., 2019). Widths are drawn per clip and
+# per call, so no two epochs mask the same bins. The values stay deliberately mild
+# for 1.0 s commands: 64 mel bins / 63 frames leave little room for large holes.
+FREQ_MASK_PARAM = 8
+TIME_MASK_PARAM = 10
+N_FREQ_MASKS = 2
+N_TIME_MASKS = 2
 
 # ---------------------------------------------------------------------------
 # Model & versioning
