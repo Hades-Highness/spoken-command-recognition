@@ -83,8 +83,19 @@ N_TIME_MASKS = 2
 # Model & versioning
 # ---------------------------------------------------------------------------
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v3.0"
+MODEL_VERSION = "v4.0"
 NUM_CLASSES = 37
+
+# ---------------------------------------------------------------------------
+# Squeeze-and-Excitation (v4.0)
+# ---------------------------------------------------------------------------
+# Architecture switch for the SE-ResNet introduced in v4.0. USE_SE = True trains
+# the channel-recalibrated graph; USE_SE = False reproduces the exact v3.0
+# network, so a quick A/B run is a one-line config flip. SE_REDUCTION is the
+# bottleneck ratio of every SE block (hidden width = C // SE_REDUCTION); it is
+# kept at 8 to stay well under 5% of the v3.0 parameter count.
+USE_SE = True
+SE_REDUCTION = 8
 
 # ---------------------------------------------------------------------------
 # Confidence calibration (T + tau)

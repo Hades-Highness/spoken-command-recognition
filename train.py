@@ -23,7 +23,9 @@ from configs.config import (  # noqa: E402
     MODEL_VERSION,
     NUM_WORKERS,
     SEED,
+    SE_REDUCTION,
     SILENCE_LABEL,
+    USE_SE,
     WEIGHT_DECAY,
     checkpoint_dir,
     reports_dir,
@@ -271,7 +273,10 @@ def main():
     ).to(device)
 
     model = CommandSense(
-        num_classes=len(train_dataset.labels), in_channels=3
+        num_classes=len(train_dataset.labels),
+        in_channels=3,
+        use_se=USE_SE,
+        se_reduction=SE_REDUCTION,
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(

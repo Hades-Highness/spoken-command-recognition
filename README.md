@@ -132,8 +132,8 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 ```text
 .
 ├── checkpoints/                  # Model weight releases (git-ignored; created at runtime)
-│   ├── model_v2.1/               # CommandSense_v2.1.pth, CommandSense_v2.1.onnx
-│   ├── model_v2.2/               # v2.2 weights: CommandSense_v2.2.pth + CommandSense_v2.2.onnx
+│   ├── model_v1.0/               # v1.0 weights: CommandSense_v1.0.pth + CommandSense_v1.0.onnx
+│   ├── ...
 │   └── model_v3.0/               # v3.0 weights: CommandSense_v3.0.pth + CommandSense_v3.0.onnx
 ├── configs/                      # Global hyperparameters, paths and the class mapping
 │   ├── calibration/              # Calibration payload: CommandSense_calibration_v3.0.json (T and tau)
@@ -144,10 +144,8 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 │   └── LibriSpeech/              # Out-of-vocabulary speech for _unknown_
 ├── reports/                      # Versioned evaluation cards, histories, reports and plots
 │   ├── model_v1.0/
-│   ├── model_v2.0/
-│   ├── model_v2.1/
-│   ├── model_v2.2/               # Calibration report, JSON/PNG artifacts and reliability plot
-│   └── model_v3.0/               # v3.0 training curves, report, confusion matrix and calibration plots
+│   ├── ...
+│   └── model_v3.0/         
 ├── src/                          # Source code modules
 │   ├── calibration.py            # Temperature scaling, ECE / reliability, tau sweep
 │   ├── dataset.py                # int16 RAM cache, centralized provisioning + rejection classes
@@ -163,7 +161,7 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 ├── export_onnx.py                # PyTorch to ONNX exporter with strict shape validation
 ├── requirements.txt              # Python environment dependencies
 ├── train.py                      # Training pipeline with AMP and graceful termination
-└── LICENSE                       # MIT
+└── LICENSE                       # MIT LICENCE
 ```
 
 ---
@@ -345,6 +343,19 @@ Both datasets are released under **CC BY 4.0**, so attribution is required when 
 
 ---
 
-## - Licence
+## Licence
 
-This project is released under the **MIT Licence**. The datasets keep their own terms (both CC BY 4.0). Model checkpoints published as release assets are covered by this project's MIT licence, but any model retrained or redistributed using the datasets must also respect their licences.
+This project is released under the [MIT License](LICENSE) — © 2026 Hades-Highness.
+
+The datasets keep their own terms (both CC BY 4.0). Model checkpoints published as release assets are covered by this project's MIT licence, but any model retrained or redistributed using the datasets must also respect their licences.
+
+---
+
+## Acknowledgements
+
+This project builds upon foundational work in the speech recognition community and leverages several open-source tools:
+
+- **Datasets**: [Google Speech Commands v0.02](https://arxiv.org/abs/1804.03209) (Warden, 2018) and [LibriSpeech](https://www.openslr.org/12/) (Panayotov et al., 2015) for training and OOD evaluation.
+- **Frameworks**: [PyTorch](https://pytorch.org/) and [Torchaudio](https://pytorch.org/audio/) for the deep learning pipeline and GPU-native audio processing.
+- **Techniques**: The conditional data augmentation strategy is inspired by [SpecAugment](https://arxiv.org/abs/1904.08779) (Park et al., 2019) and standard KWS practices for time/frequency masking.
+- **Inspiration**: This repository is the direct multi-class evolution of my earlier [Spoken Digit Recognition](https://github.com/Hades-Highness/spoken-digit-recognition) project, extending its baseline architecture to handle rejection classes and robust training at scale.
