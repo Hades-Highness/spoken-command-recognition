@@ -38,7 +38,7 @@ BATCH_SIZE = 256
 # of fork (Windows, macOS). Keep this at 0 unless you know why you need it.
 NUM_WORKERS = 0
 LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 3e-4
 EPOCHS = 30
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -74,8 +74,8 @@ TIME_SHIFT_RATIO = 0.10                   # max shift, as a share of the 1.0 s c
 # Spectral level (SpecAugment, Park et al., 2019). Widths are drawn per clip and
 # per call, so no two epochs mask the same bins. The values stay deliberately mild
 # for 1.0 s commands: 64 mel bins / 63 frames leave little room for large holes.
-FREQ_MASK_PARAM = 8
-TIME_MASK_PARAM = 10
+FREQ_MASK_PARAM = 6
+TIME_MASK_PARAM = 8
 N_FREQ_MASKS = 2
 N_TIME_MASKS = 2
 
