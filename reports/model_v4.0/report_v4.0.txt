@@ -1,0 +1,116 @@
+============================================================
+     CALIBRATION & EVALUATION REPORT (CommandSense v4.0)
+============================================================
+
+Model version    : v4.0 (trained weights, calibrated post-hoc)
+Checkpoint       : checkpoints/model_v4.0/CommandSense_v4.0.pth
+Device           : cpu
+Calibration split: 'validation' (10979 samples) - fits T and tau
+Evaluation split : 'testing' (12105 samples) - untouched by the fit
+Temperature      : T = 1.419345 (NLL minimisation, 15 bins)
+Threshold        : tau* = 0.910000 (criterion 'min_cost', minimum coverage 90.00%)
+Reject label     : _unknown_
+
+--- CALIBRATION QUALITY (validation split, where T was fitted) ---
+Samples: 10979
+Top-1 accuracy (unchanged by temperature scaling): 96.2292%
+
+                  before (T=1)      after (T=1.4193)
+NLL                   0.140796              0.129897
+ECE                   0.011479              0.004178
+MCE                   0.235222              0.146820
+
+--- CALIBRATION QUALITY (testing split, out-of-sample) ---
+Samples: 12105
+Top-1 accuracy (unchanged by temperature scaling): 95.8612%
+
+                  before (T=1)      after (T=1.4193)
+NLL                   0.153550              0.140107
+ECE                   0.014585              0.005011
+MCE                   0.183800              0.216481
+
+--- CONFIDENCE THRESHOLD DECISION (testing split, tau* = 0.91) ---
+Coverage (clips answered)       : 89.3432% (10815/12105)
+Retained accuracy (answered)    : 99.5284% (10764/10815)
+False rejection rate (FRR)      : 7.2389% of correct predictions discarded
+False acceptance rate (FAR)     : 10.1796% of incorrect predictions served
+Without any threshold (argmax)  : 95.8612% of all clips correct
+End-to-end yield                : 88.9219% of all clips answered and correct
+Rejected as uncertain           : 10.6568% served as '_unknown_'
+
+--- THRESHOLD SWEEP (testing split, calibrated confidence) ---
+   tau   coverage  retained acc      FRR      FAR
+  0.00    100.00%        95.86%    0.00%  100.00%
+  0.10     99.72%        96.13%    0.00%   93.21%
+  0.20     99.49%        96.30%    0.05%   88.82%
+  0.30     99.17%        96.49%    0.17%   84.03%
+  0.40     98.58%        96.92%    0.34%   73.45%
+  0.50     97.60%        97.42%    0.82%   60.88%
+  0.60     96.20%        97.90%    1.75%   48.70%
+  0.70     94.79%        98.46%    2.65%   35.33%
+  0.80     92.85%        98.91%    4.19%   24.35%
+  0.90     89.90%        99.47%    6.72%   11.58%
+  0.91     89.34%        99.53%    7.24%   10.18% <- tau*
+
+--- SEPARATED METRICS (raw argmax, no threshold) ---
+Top-1 Accuracy (35 Commands): 95.5020% (10510/11005)
+Recall '_silence_':               100.0000% (550/550)
+Recall '_unknown_':               98.9091% (544/550)
+
+--- DETAILED CLASSIFICATION REPORT (raw argmax) ---
+              precision    recall  f1-score   support
+
+   _silence_     1.0000    1.0000    1.0000       550
+   _unknown_     0.9767    0.9891    0.9828       550
+    backward     0.9467    0.9697    0.9581       165
+         bed     0.9793    0.9130    0.9450       207
+        bird     0.9365    0.9568    0.9465       185
+         cat     0.9639    0.9639    0.9639       194
+         dog     0.9519    0.9000    0.9252       220
+        down     0.9697    0.9458    0.9576       406
+       eight     0.9702    0.9583    0.9642       408
+        five     0.9457    0.9775    0.9613       445
+      follow     0.9012    0.9012    0.9012       172
+     forward     0.9122    0.8710    0.8911       155
+        four     0.9195    0.9425    0.9309       400
+          go     0.9093    0.9478    0.9281       402
+       happy     0.9795    0.9409    0.9598       203
+       house     0.9485    0.9634    0.9558       191
+       learn     0.7958    0.9441    0.8636       161
+        left     0.9636    0.9636    0.9636       412
+      marvin     1.0000    0.9436    0.9710       195
+        nine     0.9777    0.9681    0.9729       408
+          no     0.9510    0.9580    0.9545       405
+         off     0.9894    0.9328    0.9603       402
+          on     0.9687    0.9369    0.9525       396
+         one     0.9641    0.9424    0.9531       399
+       right     0.9921    0.9571    0.9743       396
+       seven     0.9877    0.9852    0.9864       406
+      sheila     0.9809    0.9670    0.9739       212
+         six     0.9653    0.9898    0.9774       394
+        stop     0.9602    0.9976    0.9785       411
+       three     0.9465    0.9605    0.9534       405
+        tree     0.9763    0.8549    0.9116       193
+         two     0.9602    0.9670    0.9636       424
+          up     0.8851    0.9788    0.9296       425
+      visual     0.9623    0.9273    0.9444       165
+         wow     0.9746    0.9320    0.9529       206
+         yes     0.9903    0.9785    0.9844       419
+        zero     0.9669    0.9785    0.9727       418
+
+    accuracy                         0.9586     12105
+   macro avg     0.9559    0.9515    0.9531     12105
+weighted avg     0.9597    0.9586    0.9587     12105
+
+============================================================
+NOTES
+============================================================
+* Temperature scaling is applied to the logits before the softmax, so it never
+  changes the argmax: the top-1 accuracy of v2.1 and v2.2 is identical by
+  construction, and only the reported confidence changes.
+* FRR and FAR are conditional rates: FRR is measured over the correct (raw)
+  predictions and FAR over the incorrect ones, so they are directly comparable
+  between operating points.
+* The exported ONNX graph keeps raw logits; T and tau are applied by the Python
+  runtime, so the threshold can be changed without re-exporting the model.
+
