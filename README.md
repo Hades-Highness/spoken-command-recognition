@@ -134,7 +134,8 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 ├── checkpoints/                  # Model weight releases (git-ignored; created at runtime)
 │   ├── model_v2.1/               # CommandSense_v2.1.pth, CommandSense_v2.1.onnx
 │   ├── model_v2.2/               # v2.2 weights: CommandSense_v2.2.pth + CommandSense_v2.2.onnx
-│   └── model_v3.0/               # v3.0 weights: CommandSense_v3.0.pth + CommandSense_v3.0.onnx
+│   ├── model_v3.0/               # v3.0 weights: CommandSense_v3.0.pth + CommandSense_v3.0.onnx
+│   └── model_v3.1/               # INT8 build: CommandSense_v3.1_fp32.onnx + CommandSense_v3.1_int8.onnx
 ├── configs/                      # Global hyperparameters, paths and the class mapping
 │   ├── calibration/              # Calibration payload: CommandSense_calibration_v3.0.json (T and tau)
 │   ├── config.py                 # Training, audio, augmentation and calibration settings
@@ -147,7 +148,8 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 │   ├── model_v2.0/
 │   ├── model_v2.1/
 │   ├── model_v2.2/               # Calibration report, JSON/PNG artifacts and reliability plot
-│   └── model_v3.0/               # v3.0 training curves, report, confusion matrix and calibration plots
+│   ├── model_v3.0/               # v3.0 training curves, report, confusion matrix and calibration plots
+│   └── model_v3.1/               # INT8 quantization report for the v3.0 weights (see quantize_int8.py)
 ├── src/                          # Source code modules
 │   ├── calibration.py            # Temperature scaling, ECE / reliability, tau sweep
 │   ├── dataset.py                # int16 RAM cache, centralized provisioning + rejection classes
@@ -157,10 +159,12 @@ Each `ResidualBlock` is two 3×3 convolutions with batch normalization and a 1×
 │   └── utils.py                  # Audio loading and preprocessing (single source of truth)
 ├── tests/
 │   ├── test_calibration_smoke.py  # Lightweight evaluation smoke test (no dataset required)
+│   ├── test_v3_1_quantization.py  # INT8 artifact contract, fidelity and latency smoke test
 │   └── test_v3_pipeline.py        # v3.0 int16 cache, GPU front-end and conditional augmentation tests
 ├── app.py                        # Interactive Gradio Web UI with a live tau slider
 ├── evaluate.py                   # Metrics, classification report, calibration fit and tau sweep
 ├── export_onnx.py                # PyTorch to ONNX exporter with strict shape validation
+├── quantize_int8.py              # v3.1: static INT8 (QDQ) quantization of the v3.0 ONNX graph
 ├── requirements.txt              # Python environment dependencies
 ├── train.py                      # Training pipeline with AMP and graceful termination
 └── LICENSE                       # MIT

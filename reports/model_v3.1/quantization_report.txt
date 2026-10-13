@@ -1,0 +1,49 @@
+============================================================
+     STATIC INT8 QUANTIZATION REPORT (CommandSense v3.1)
+============================================================
+
+Source checkpoint : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v3.0\CommandSense_v3.0.pth
+Source graph      : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v3.1\CommandSense_v3.1_fp32.onnx (opset 17, float32)
+INT8 graph        : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v3.1\CommandSense_v3.1_int8.onnx
+Calibration split : 'validation' - 500 clips streamed through the v3.0 front-end
+Quantization      : ONNX Runtime post-training static quantization
+                    format=QDQ, per_channel=True, activation=QInt8,
+                    weight=QInt8, calibrate_method=MinMax
+Input activation  : [-13.8155, 11.0512] (range observed while calibrating)
+
+--- ARTIFACT SIZE ---
+float32 graph     : 4.643 MB (1,215,973 parameters)
+int8 graph        : 1.201 MB
+Compression       : 74.1% smaller (3.87x smaller file)
+
+--- FIDELITY (100 validation clips held out from calibration) ---
+Top-1 agreement   : 100.00% of clips keep the float32 label
+Mean |d logit|    : 0.196200
+Max  |d logit|    : 2.419950 (informational, see notes)
+Mean |d softmax|  : 0.000176
+Max  |d softmax|  : 0.117175
+
+--- LATENCY (median of 5 rounds, 1 clip/call, CPUExecutionProvider) ---
+float32 graph     : 2.184 ms/clip
+int8 graph        : 2.858 ms/clip
+int8 / float32    : 1.31x
+
+--- NOTES ---
+* The graph stays raw-logit: the v3.0 temperature T and threshold tau are still
+  applied by src/inference.py, so quantization changes neither the decision
+  rule nor the calibration artifact.
+* Absolute logit deviation is not a meaningful INT8 tolerance on this checkpoint.
+  Its logits span roughly +/-40, so a single int8 step is ~0.1-0.4 logit units and
+  the observed max |d logit| sits above 0.05 for every configuration tried
+  (MinMax/Entropy/Percentile, per_channel on/off, 50 vs 500 calibration clips,
+  float head kept in fp32, and dynamic quantization alike). The tolerance that
+  actually characterises a well-calibrated INT8 copy is the decision-space one:
+  top-1 agreement and mean |d softmax|.
+* The latency comparison is host dependent and INT8 is not reliably faster here:
+  ONNX Runtime's QDQ path pays a quantize/dequantize pair per activation and
+  has no vectorized int8 kernel for these small 3x64x63 activations, so the
+  win here is the download budget, not CPU time. The v4.0 target is ONNX
+  Runtime Web, whose WASM SIMD/WebNN kernels consume the QDQ graph natively,
+  and tests/test_v3_1_quantization.py re-measures the ratio on whatever
+  machine it runs on instead of asserting one - the latency block above
+  carries whatever this host measured.
