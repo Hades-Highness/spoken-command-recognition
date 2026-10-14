@@ -3,40 +3,31 @@
 Loads the two ONNX graphs ``quantize_int8.py`` leaves in
 ``checkpoints/model_v3.1/`` and compares them on a seeded draw of the *testing*
 split - the split that trained neither the weights, nor the calibration ranges, nor
-the temperature/threshold pair. It asserts the properties a deployable INT8 copy
-must keep:
+the temperature/threshold pair. It asserts what a deployable INT8 copy must keep:
+the same output shape (``NUM_CLASSES`` raw logits on a dynamic batch axis), top-1
+agreement with the float32 graph of at least ``TOP1_AGREEMENT_MIN``, per-class
+agreement including the ``_silence_`` / ``_unknown_`` rejection classes (so a class
+that quantizes badly cannot hide in the aggregate), mean absolute softmax drift
+below ``SOFTMAX_DRIFT_MAX``, and the operating point the artifact documents
+(``commandsense.calibration.*``) matching the v3.1 JSON ``src/inference.py`` serves
+and still transferring to the quantized graph within tolerance on this draw.
 
-* identical output shape (``NUM_CLASSES`` raw logits, dynamic batch axis),
-* top-1 agreement with the float32 graph of at least ``TOP1_AGREEMENT_MIN`` - a
-  floor *derived* from the calibration run's own measurement minus three standard
-  errors of this test's sample, not a round number (see the constants below),
-* per-class top-1 agreement including the ``_silence_`` / ``_unknown_`` rejection
-  classes, so a class that quantizes badly cannot hide in the aggregate,
-* mean absolute softmax drift below ``SOFTMAX_DRIFT_MAX``,
-* the operating point the artifact documents (``commandsense.calibration.*``)
-  matching the v3.1 JSON that ``src/inference.py`` serves, i.e. the payload is
-  recoverable from the graph alone, and still transferring to the quantized graph
-  within tolerance on this draw.
-
-Measured over the whole testing split (12 105 clips), ``quantize_int8.py`` keeps
-99.40% of the float32 labels: the handful of flips sit on near ties, where the
-float32 graph's own top-1/top-2 softmax margin is below 0.06 for most of them. That
-is why the floor allows a few disagreements instead of demanding an identical
-argmax - an exact match is a property of the sample, not of the quantization. The
-number of flips, their margins and the raw-logit deviation are all printed for
+Over the whole testing split (12,105 clips) 99.55% of the float32 labels survive,
+and the few flips sit on near ties whose float32 top-1/top-2 softmax margin is
+mostly below 0.06 - which is why the floor allows a few disagreements instead of
+demanding an identical argmax: an exact match is a property of the sample, not of
+the quantization. Flips, their margins and the raw-logit deviation are printed for
 inspection.
 
-The raw-logit L-infinity deviation is printed as an informational metric only.
-This checkpoint is very confident (logits span roughly +/-40), so a single int8
-step is already ~0.1-0.4 logit units and any absolute bound near zero is below the
-quantizer's resolution - it is unreachable by every post-training scheme, as the
-quantization report documents. The decision-space bounds above are the ones that
-characterise a usable copy, because the v3.0 temperature T and threshold tau are
-applied downstream by ``src/inference.py`` and only ever see the softmax.
+The raw-logit L-infinity deviation is informational only: this checkpoint is very
+confident (logits span roughly +/-40), so one int8 step is already ~0.1-0.4 logit
+units and any tight absolute bound sits below the quantizer's resolution. The
+decision-space bounds above are the ones that characterise a usable copy, because
+``src/inference.py`` applies T and tau downstream and only ever sees the softmax.
 
-Latency is measured and printed, never asserted: it is a property of the host and
-of the ONNX Runtime build, and on the CPU provider the QDQ graph is *not* faster
-(see ``reports/model_v3.1/quantization_report.txt``), so nothing here claims one.
+Latency is measured and printed, never asserted: it is a property of the host and of
+the ONNX Runtime build, and on the CPU provider the QDQ graph is *not* faster (see
+``reports/model_v3.1/quantization_report.txt``).
 
 Run directly:  python tests/test_v3_1_quantization.py
 """
@@ -68,20 +59,18 @@ from train import set_seed  # noqa: E402  (shared seeding helper, as in evaluate
 VERSION = "v3.1"                       # INT8 release under test
 SOURCE_VERSION = "v3.0"                # float32 release it was derived from
 EVALUATION_SPLIT = "testing"           # never seen by training, calibration or T/tau
-# 1000 clips is ~27 per class on the 37-label axis: enough for the per-class table
+# 1,000 clips is ~27 per class on the 37-label axis: enough for the per-class table
 # below to say something, while the split build still dominates the runtime.
 EVALUATION_SAMPLES = 1000
 INPUT_NAME = "input"
 CPU_PROVIDERS = ["CPUExecutionProvider"]
 # Top-1 agreement the calibration run measured over the *whole* testing split, as
-# printed by quantize_int8.py and stored in
-# reports/model_v3.1/quantization_report.txt: 12 105 clips, 99.55% of which keep
-# the float32 label. The floor is derived from it rather than picked: at
-# N = EVALUATION_SAMPLES the binomial standard error of an agreement estimate is
-# sqrt(p (1 - p) / N) ~= 0.21 pt, so three standard errors below the measured value
-# is ~98.92%. A round 95% would let a real 3-point regression through, while
-# asserting the measured value itself would fail on the draw alone.
-# Refresh MEASURED_TOP1_AGREEMENT whenever the report is regenerated.
+# printed by quantize_int8.py into reports/model_v3.1/quantization_report.txt. The
+# floor is derived from it rather than picked: at N = EVALUATION_SAMPLES the binomial
+# standard error of an agreement estimate is sqrt(p (1 - p) / N) ~= 0.21 pt, so three
+# standard errors below the measured value is ~98.92% - a round 95% would let a real
+# 3-point regression through, while asserting the measured value itself would fail on
+# the draw alone. Refresh MEASURED_TOP1_AGREEMENT whenever the report is regenerated.
 MEASURED_TOP1_AGREEMENT = 0.9955
 TOP1_AGREEMENT_SIGMA = float(
     np.sqrt(
@@ -95,13 +84,14 @@ TOP1_AGREEMENT_MIN = MEASURED_TOP1_AGREEMENT - 3.0 * TOP1_AGREEMENT_SIGMA
 # bound is not meaningful class by class, so this is a collapse guard (a class may
 # lose at most one clip in ten) and the printed table carries the real detail.
 PER_CLASS_AGREEMENT_MIN = 0.90
-# Decision-space tolerance: the softmax probabilities must stay within 0.05 in
-# the mean, far tighter than the +/-1 label change that would matter downstream.
+# Decision-space tolerance: the mean softmax drift must stay far tighter than the
+# +/-1 label change that would matter downstream.
 SOFTMAX_DRIFT_MAX = 0.05
-# Coverage gap v3.1 is allowed to show against float32 while reusing v3.0's T/tau,
-# plus the sampling slack of a 1000-clip draw (~sqrt(2 * 0.9 * 0.1 / 1000) is 1.3 pt
-# at two standard errors). The decision itself is made on the whole split in
-# quantize_int8.py with a 0.5 pt tolerance; this is the artifact-level guard.
+# Coverage gap v3.1 may show against float32 while reusing v3.0's T/tau. A 1,000-clip
+# draw carries ~0.95 pt of sampling error on a coverage estimate (~1.3 pt for an
+# unpaired gap) and this draw is paired (both graphs score the same clips), so the
+# guard is generous; the shipped decision is made on the whole split inside
+# quantize_int8.py, with a 0.5 pt tolerance.
 COVERAGE_TOLERANCE_MAX = 0.02
 BENCHMARK_ROUNDS = 3
 
@@ -185,7 +175,12 @@ def per_class_agreement(state):
             continue
         flips = int(np.count_nonzero(fp32_top1[mask] != int8_top1[mask]))
         rows.append(
-            {"label": label, "n": count, "flips": flips, "agreement": 1.0 - flips / count}
+            {
+                "label": label,
+                "n": count,
+                "flips": flips,
+                "agreement": 1.0 - flips / count,
+            }
         )
     return rows
 
@@ -404,6 +399,7 @@ def test_operating_point_transfer():
         f"{accuracy_gap * 100:.2f} pt), FRR "
         f"{measured['int8']['frr'] * 100:.2f}%, FAR {measured['int8']['far'] * 100:.2f}%"
     )
+
 
 def test_softmax_drift():
     """The probabilities fed to the temperature/threshold stage must stay close."""

@@ -8,17 +8,12 @@ The run has two halves, and they never share a split:
    retained accuracy / FRR / FAR at ``tau*``, and the same 37x37 confusion
    matrix as v2.1 so the two versions stay comparable.
 
-Artifacts written to ``reports/model_v2.2/``::
-
-    report_v2.2.txt                 human-readable metrics
-    calibration_v2.2.png            confidence vs accuracy, before/after T
-    coverage_vs_accuracy_v2.2.png   coverage / retained accuracy / FRR / FAR vs tau
-    confusion_matrix_v2.2.png       37x37 confusion matrix of the evaluation split
-
-The deployment artifact read by ``src/inference.py`` and ``app.py`` is written to
-``configs/calibration/CommandSense_calibration_v2.2.json``: it is versioned
-configuration rather than a weight, so it is kept out of both the report folder
-and the git-ignored ``checkpoints/`` tree.
+``reports/model_v2.2/`` receives ``report_v2.2.txt`` and three PNGs (reliability
+diagram, coverage vs accuracy, confusion matrix). The deployment artifact read by
+``src/inference.py`` and ``app.py`` goes to
+``configs/calibration/CommandSense_calibration_v2.2.json`` instead: it is
+versioned configuration rather than a weight, so it is kept out of both the
+report folder and the git-ignored ``checkpoints/`` tree.
 
 Like ``train.py``, an interrupted run still writes what it has, under an
 ``_interrupted`` file-name suffix, and skips the deployment JSON so a partial fit
@@ -454,7 +449,6 @@ def main():
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    # ------------------------------------------------- fit on the val split
     interrupted = False
     calibration_logit_parts, calibration_target_parts = [], []
     class_names = None
@@ -509,7 +503,6 @@ def main():
     del calibration_logits, calibrated_probabilities
     gc.collect()
 
-    # ------------------------------------------- measure on the test split
     evaluation_logit_parts, evaluation_target_parts = [], []
     evaluation_logits, evaluation_targets = None, None
     evaluation_labels = None
@@ -563,7 +556,6 @@ def main():
         )
         command_total = int(np.count_nonzero(command_mask))
 
-    # ------------------------------------------------------- console block
     print("\n" + "=" * 60)
     print(f"       EVALUATION REPORT ({MODEL_NAME} {MODEL_VERSION})       ")
     print("=" * 60)
@@ -611,7 +603,6 @@ def main():
         print("PARTIAL RUN: Ctrl+C stopped the sweep, so the numbers above are incomplete.")
     print("=" * 60 + "\n")
 
-    # --------------------------------------------------------- artifacts
     ensure_version_dirs()
     out_dir = reports_dir(MODEL_VERSION)
     suffix = "_interrupted" if interrupted else ""
@@ -664,7 +655,6 @@ def main():
     del evaluation_logits, evaluation_targets
     gc.collect()
 
-    # ---------------------------------------------- deployment artifact
     reported = evaluation_summary or calibration_summary
     metadata = calibration.build_calibration_metadata(
         temperature=temperature,

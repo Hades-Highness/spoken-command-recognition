@@ -3,50 +3,37 @@
 v3.0 ships a float32 ONNX graph; v3.1 keeps its weights frozen and produces the
 INT8 sibling that the browser / edge runtime (v4.0, ONNX Runtime Web) will serve:
 
-1. re-export the v3.0 checkpoint to ONNX (opset 17, dynamic batch axis) - this
+1. re-export the v3.0 checkpoint to ONNX (opset 17, dynamic batch axis): this
    float32 graph is the reference the quantizer needs and the baseline every
    fidelity, decision and latency number below is measured against,
 2. calibrate the activation ranges on ``CALIBRATION_SAMPLES`` clips of the
    *validation* split, streamed one clip at a time through the v3.0 front-end so
    the same ``src.transforms.AudioToThreeChannelMel`` math trains and deploys,
-3. quantize statically with ONNX Runtime post-training quantization in the
-   ``QDQ`` format (per-channel int8 weights, int8 activations, MinMax ranges).
-   QDQ is the format ONNX Runtime Web executes natively, which keeps the v4.0
-   WASM/WebNN path open,
-4. score *both* graphs over the whole ``testing`` split - a split that trained
-   neither the weights, nor the activation ranges, nor ``T``/``tau`` - and report
-   the fidelity (top-1 agreement, per-class flips, softmax drift) and the
-   operating point (coverage / retained accuracy / FRR / FAR at v3.0's T and tau),
-5. decide from that measurement whether v3.0's operating point transfers to the
-   quantized graph, and write the v3.1 calibration payload accordingly: v3.0's
-   T/tau are reused while quantizing moves the coverage by less than
-   ``COVERAGE_TOLERANCE``, above which T and tau are re-fitted on the INT8 logits
-   of the validation split,
-6. embed that payload into the graph's ``metadata_props`` - and read it back, so the
-   reader a single-file runtime uses is exercised, not just the writer - then write
-   the artifact to ``checkpoints/model_v3.1/`` and a human-readable report to
+3. quantize statically with ONNX Runtime post-training quantization in the ``QDQ``
+   format (per-channel int8 weights, int8 activations, MinMax ranges) - the format
+   ONNX Runtime Web executes natively, which keeps the v4.0 WASM/WebNN path open,
+4. score *both* graphs over the whole ``testing`` split - which trained neither the
+   weights, nor the activation ranges, nor ``T``/``tau`` - and report the fidelity
+   (top-1 agreement, per-class flips, softmax drift) and the operating point
+   (coverage / retained accuracy / FRR / FAR at v3.0's T and tau),
+5. reuse v3.0's T/tau while quantizing moves the coverage by less than
+   ``COVERAGE_TOLERANCE``, and re-fit T and tau on the INT8 logits of the
+   validation split above it,
+6. embed that payload into the graph's ``metadata_props`` and read it back - which
+   exercises the reader a single-file runtime would use, not only the writer - then
+   write the artifact to ``checkpoints/model_v3.1/`` and a human-readable report to
    ``reports/model_v3.1/quantization_report.txt``.
 
-Split provenance, stated rather than assumed, because it decides whether the
-numbers below mean anything:
+Split provenance: the activation ranges and ``T``/``tau`` both come from
+'validation' ('testing' would leak the measurement split into the shipped
+artifact) and the measurement uses 'testing' only, never feeding back into the
+artifact. Because the validation split is then used twice, v3.0's operating point
+is re-measured on 'testing' before being reused.
 
-* activation ranges - ``CALIBRATION_SPLIT`` ('validation'), 500 clips. 'testing'
-  would leak the evaluation split into the shipped artifact; 'training' would be
-  the strictly safer choice, where the same split is then used only once. The
-  reuse of 'validation' for the ranges *and* for T/tau is named in the report.
-* ``T``/``tau`` - the same 'validation' split, as in ``evaluate.py``. That is why
-  v3.0's operating point is re-measured on 'testing' before being reused instead
-  of being copied on faith.
-* measurement - 'testing' only, and never fed back into the artifact.
-
-The run is reproducible: ``set_seed`` fixes the split draw - including the extra
-``_silence_`` / ``_unknown_`` clips the v3.0 dataset samples from the global
-generator - before calibration, so a rebuild of the same checkpoint reproduces the
-same activation ranges and the same calibration decision.
-
-Nothing here touches training or model code: the checkpoint is read-only and the
-graph stays raw-logit, so the temperature ``T`` and threshold ``tau`` from
-``src/calibration.py`` are still applied at runtime.
+The run is reproducible: ``set_seed`` fixes the split draw, including the extra
+``_silence_`` / ``_unknown_`` clips, before calibration. The checkpoint is read-only
+and the graph stays raw-logit, so ``T`` and ``tau`` from ``src/calibration.py`` are
+still applied at runtime by ``src/inference.py``.
 
 Run with:  python quantize_int8.py
 """
@@ -103,34 +90,28 @@ for _stream in (sys.stdout, sys.stderr):
         except (ValueError, OSError):  # pragma: no cover - exotic stream types
             pass
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 SOURCE_VERSION = "v3.0"        # frozen float32 release that gets quantized
 TARGET_VERSION = "v3.1"        # INT8-only release
 OPSET_VERSION = 17             # same opset as export_onnx.py
 INPUT_NAME = "input"
 OUTPUT_NAME = "output"
-# Split the activation ranges are measured on. 'testing' would leak the evaluation
+# Split the activation ranges are measured on: 'testing' would leak the evaluation
 # split into the shipped artifact, so it is never used; 'validation' is the split
-# evaluate.py also fits T/tau on, i.e. the one split used twice. That reuse is
-# named in the report and in the v3.1 calibration payload instead of being left
-# implicit - see the module docstring.
+# evaluate.py also fits T/tau on (see the module docstring and the report).
 CALIBRATION_SPLIT = "validation"
 # 500 clips is the empirical sweet spot: the activation ranges stop moving well
 # before it, while the whole split (~11k clips) takes minutes to decode on CPU.
 CALIBRATION_SAMPLES = 500
 # Split the decision numbers are measured on: it fed neither the weights, nor the
-# activation ranges, nor T/tau. Scored in full so the fp32/int8 comparison is an
-# operating-point measurement rather than a sample of one.
+# activation ranges, nor T/tau, and it is scored in full.
 EVALUATION_SPLIT = "testing"
 EVALUATION_SAMPLES = 0             # 0 -> every clip of EVALUATION_SPLIT
 # Reusing v3.0's T/tau for the quantized graph is defensible while quantization
 # moves the coverage of a graph by no more than this (0.5 point of the split);
 # above it, T and tau are re-fitted on the INT8 logits - see fit_operating_point.
 COVERAGE_TOLERANCE = 0.005
-# Clips materialised at once while a split is scored: 23 000 spectrograms never
-# sit in RAM at the same time.
+# Clips materialised at once while a split is scored: the features of a whole
+# split never sit in RAM at the same time.
 CLIP_CHUNK = 512
 # Features kept for the latency comparison: enough rounds for a stable median
 # without turning the benchmark into a second pass over the split.
@@ -139,14 +120,11 @@ BENCHMARK_ROUNDS = 5
 FP32_SUFFIX = "_fp32"
 INT8_SUFFIX = "_int8"
 REPORT_NAME = "quantization_report.txt"
-# Every session below runs on the CPU provider, so the measured latency is
+# Every session below runs on the CPU provider, so the measured latency stays
 # comparable across machines and independent of whichever other EPs are installed.
 CPU_PROVIDERS = ["CPUExecutionProvider"]
 
 
-# ---------------------------------------------------------------------------
-# Model / graph plumbing
-# ---------------------------------------------------------------------------
 def resolve_checkpoint(version=SOURCE_VERSION):
     """Return the weights to quantize, canonical layout first (see export_onnx.py)."""
     candidates = [
@@ -202,9 +180,6 @@ def count_parameters(onnx_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# Calibration
-# ---------------------------------------------------------------------------
 class ClipCalibrationReader(CalibrationDataReader):
     """Streams calibration clips through the v3.0 front-end, one clip at a time.
 
@@ -263,7 +238,7 @@ def score_split(dataset, extractor, sessions, indices, chunk=CLIP_CHUNK):
 
     The split is walked in ``chunk``-sized batches whose features are built, scored
     by every session and then dropped, so scoring a whole split keeps only the
-    ``[n, NUM_CLASSES]`` logit matrices in memory instead of 23 000 spectrograms.
+    ``[n, NUM_CLASSES]`` logit matrices in memory instead of 23,000 spectrograms.
     """
     targets = []
     parts = {name: [] for name in sessions}
@@ -279,9 +254,6 @@ def score_split(dataset, extractor, sessions, indices, chunk=CLIP_CHUNK):
     return logits, np.asarray(targets, dtype=np.int64)
 
 
-# ---------------------------------------------------------------------------
-# Quantization
-# ---------------------------------------------------------------------------
 def quantize_graph(fp32_path, int8_path, reader):
     """Post-training static quantization to QDQ int8 (weights and activations)."""
     quantize_static(
@@ -297,9 +269,6 @@ def quantize_graph(fp32_path, int8_path, reader):
     print(f"[+] INT8 graph written -> {int8_path}")
 
 
-# ---------------------------------------------------------------------------
-# Fidelity / latency measurement
-# ---------------------------------------------------------------------------
 def softmax(logits):
     shifted = logits - logits.max(axis=1, keepdims=True)
     exponentials = np.exp(shifted)
@@ -411,8 +380,14 @@ def per_class_agreement(fp32_logits, int8_logits, targets, labels):
         if count == 0:
             continue
         flips = int(np.count_nonzero(fp32_top1[mask] != int8_top1[mask]))
-        rows.append({"label": label, "n": count, "flips": flips,
-                     "agreement": 1.0 - flips / count})
+        rows.append(
+            {
+                "label": label,
+                "n": count,
+                "flips": flips,
+                "agreement": 1.0 - flips / count,
+            }
+        )
     return rows
 
 
@@ -426,8 +401,11 @@ def command_agreement(rows):
     commands = [row for row in rows if row["label"] not in REJECTION_CLASSES]
     count = sum(row["n"] for row in commands)
     flips = sum(row["flips"] for row in commands)
-    return {"n": count, "flips": flips,
-            "agreement": (1.0 - flips / count) if count else 1.0}
+    return {
+        "n": count,
+        "flips": flips,
+        "agreement": (1.0 - flips / count) if count else 1.0,
+    }
 
 
 def benchmark(session, features, rounds=BENCHMARK_ROUNDS):
@@ -507,9 +485,6 @@ def verify_int8_graph(int8_path):
     return model
 
 
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
 def build_report(context):
     """Render the plain-text quantization report (mirrors report_v3.0.txt).
 
@@ -703,9 +678,6 @@ def build_report(context):
     return "\n".join(lines) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 def load_split(subset):
     """Build one split on the raw-int16 cache, with augmentation off.
 

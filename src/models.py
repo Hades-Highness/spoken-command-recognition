@@ -48,7 +48,6 @@ class ResidualBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
-        # Identity shortcut, projected when the shape changes
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -73,9 +72,9 @@ class CommandSense(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        self.layer1 = ResidualBlock(32, 64, stride=2)    # -> [64, 32, 32]
-        self.layer2 = ResidualBlock(64, 128, stride=2)   # -> [128, 16, 16]
-        self.layer3 = ResidualBlock(128, 256, stride=2)  # -> [256, 8, 8]
+        self.layer1 = ResidualBlock(32, 64, stride=2)
+        self.layer2 = ResidualBlock(64, 128, stride=2)
+        self.layer3 = ResidualBlock(128, 256, stride=2)
 
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.dropout = nn.Dropout(0.3)

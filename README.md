@@ -12,11 +12,33 @@
 
 ---
 
-An end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition, featuring a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary speech. **v3.0** moves the whole signal front-end onto the accelerator: raw `torch.int16` audio now sits in RAM and the Log-Mel + Δ + Δ² features are built on the fly on the GPU, together with GPU-native conditional augmentation.
+An end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition, featuring a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary speech. **v3.0** moves the whole signal front-end onto the accelerator: raw `torch.int16` audio now sits in RAM and the Log-Mel + Δ + Δ² features are built on the fly on the GPU, together with GPU-native conditional augmentation. **v3.1** retrains nothing: it statically quantizes the frozen v3.0 graph to INT8 - a 74.1 % smaller file - for the ONNX Runtime Web deployment path that v4.0 targets.
 
 *The multi-class keyword evolution of [spoken-digit-recognition](https://github.com/Hades-Highness/spoken-digit-recognition).*
 
 ---
+
+## - What's New in v3.1
+
+**CommandSense v3.1** is a deployment release, not a new model. It retrains nothing, adds no layer, no parameter and no hyperparameter, and keeps the v3.0 weights frozen: the release is the **INT8 sibling of the v3.0 ONNX graph**, built by post-training static quantization for the ONNX Runtime Web path that v4.0 targets.
+
+#### - Static INT8 Quantization
+
+* `quantize_int8.py` re-exports the v3.0 checkpoint to ONNX (opset 17, dynamic batch axis) and quantizes it in the **QDQ format** ONNX Runtime Web executes natively: per-channel int8 weights, int8 activations, MinMax ranges.
+* The activation ranges are calibrated on **500 `validation` clips** streamed through the deployed `AudioToThreeChannelMel` front-end, so the graph records the ranges it will actually see. `testing` never feeds the artifact.
+* **74.1 % smaller file**: 4.643 MB (float32) -> 1.202 MB (INT8), 3.86x. Parameters stay at 1,217,349; the exported graph reports 1,215,973 initializers because the exporter folds batch normalization, so the two counts are not the same quantity.
+* **Fidelity is the claim, not speed**: **99.55 %** of the 12,105 `testing` clips keep the float32 label - 54 flips, mean softmax drift 0.0002 - and the flips sit on ties. On the CPU provider the INT8 graph is **not** faster: 2.718 ms/clip against 1.614 ms/clip (1.68x).
+* The v3.0 operating point transfers: coverage moves by **0.21 pt** against a 0.5-pt tolerance, so v3.1 ships the same `T = 1.311633` and `tau = 0.89`, written both into `configs/calibration/CommandSense_calibration_v3.1.json` and into the graph's `commandsense.calibration.*` metadata.
+
+| Metric | float32 graph | INT8 graph |
+| :--- | :---: | :---: |
+| File size | 4.643 MB | **1.202 MB** (74.1 % smaller) |
+| Top-1 agreement with float32 | reference | **99.55 %** (54 / 12,105 clips) |
+| Coverage at `T = 1.311633` / `tau = 0.89` | 89.76 % | **89.98 %** (+0.21 pt) |
+| Retained accuracy within coverage | 99.50 % | **99.50 %** (-0.01 pt) |
+| CPU latency (1 clip per call) | 1.614 ms | 2.718 ms (1.68x) |
+
+The INT8 build is a build output rather than a download: it lands in the git-ignored `checkpoints/model_v3.1/` tree and is produced locally with `python quantize_int8.py`. The [v3.1 card](reports/model_v3.1/README.md) carries the full recipe, the per-class fidelity table, the operating-point comparison and the caveats.
 
 ## - What's New in v3.0
 
@@ -52,7 +74,7 @@ An end-to-end deep learning pipeline for spoken keyword spotting and audio comma
 
 ## - Note on Model Versions & Source Code
 
-The current repository source code and the interactive web interface **(`app.py`)** are optimized **exclusively** for the **CommandSense v3.0** release — no longer for the v2.x line: 37 output classes (35 command words plus `_silence_` and `_unknown_`), a GPU-resident three-channel 16 kHz front-end, and a fitted temperature `T` with a confidence threshold `tau` applied on top of the trained weights. A single `CommandSense_v3.0.pth` serves the whole repository, so the CLI (`src/inference.py`) and the web UI (`app.py`) always report exactly the numbers published below. The v2.x family — up to and including the **v2.2** calibration release, which reuses the v2.1 weights byte-for-byte and adds nothing but `T` and `tau` — remains available from its own tags and releases, and its results stay under `reports/model_v2*/`.
+The current repository source code and the interactive web interface **(`app.py`)** are optimized **exclusively** for the **CommandSense v3.0** release — no longer for the v2.x line: 37 output classes (35 command words plus `_silence_` and `_unknown_`), a GPU-resident three-channel 16 kHz front-end, and a fitted temperature `T` with a confidence threshold `tau` applied on top of the trained weights. A single `CommandSense_v3.0.pth` serves the whole repository, so the CLI (`src/inference.py`) and the web UI (`app.py`) always report exactly the numbers published below. The v2.x family — up to and including the **v2.2** calibration release, which reuses the v2.1 weights byte-for-byte and adds nothing but `T` and `tau` — remains available from its own tags and releases, and its results stay under `reports/model_v2*/`. **v3.1** adds nothing to that arrangement: the INT8 graph is a build output of the same v3.0 weights, `src/inference.py` and `app.py` are unchanged and keep serving `MODEL_VERSION = "v3.0"`, and the versioned `configs/calibration/CommandSense_calibration_v3.1.json` exists so the INT8 artifact carries its own operating point (see the [v3.1 card](reports/model_v3.1/README.md)).
 
 Model artifacts **(`.pth` and `.onnx`)** for official releases are available in the **GitHub Releases** section to keep the source repository lightweight and version-controlled. Older checkpoints remain downloadable from their own releases, and their results stay in the repository under `reports/model_v<version>/`.
 
@@ -89,6 +111,7 @@ Every version is trained with the same recipe (residual CNN, AdamW at `1e-3`, we
 | **v2.1** | Rejection classes: `_silence_` (background noise) + `_unknown_` (LibriSpeech OOV speech) | 1,217,349 | 94.96% † | **94.1481%** | **0.9363** | `_silence_` 97.82%<br>`_unknown_` 98.36% | 94.5064% | **−0.6361** | [v2.1 card](reports/model_v2.1/README.md) |
 | **v2.2** | Calibration release: temperature scaling + confidence threshold, **no new weights** | 1,217,349 | 94.94% | **94.1481%** | 0.9364 | `_silence_` 98.36%<br>`_unknown_` 99.09% | 94.5642% | **0.0000** ‡ | [v2.2 card](reports/model_v2.2/README.md) |
 | **v3.0** | Memory-optimized pipeline: int16 RAM cache + GPU front-end + conditional GPU augmentation (30-epoch schedule) | 1,217,349 | 96.36% | **95.8655%** | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | **+1.7174** | [v3.0 card](reports/model_v3.0/README.md) |
+| **v3.1** | Deployment release: static INT8 (QDQ) quantization of the frozen v3.0 graph - **no new weights, so every accuracy cell in this row is v3.0's** | 1,217,349 | 96.36% | **95.8655%** | 0.9541 | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | — | [v3.1 card](reports/model_v3.1/README.md) |
 
 † The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
 
@@ -106,6 +129,7 @@ Every version is trained with the same recipe (residual CNN, AdamW at `1e-3`, we
 * **Per-version detail lives in the model cards, not here.** Each card carries its own epoch-by-epoch history, full per-class table, confusion matrix and caveats, and each card is written to stand alone — cards are not compared against each other.
 * **Watch the `Params` column.** Parameters are capacity. A version that changes both the architecture and the front-end at once is not a single-variable experiment.
 * **v2.2 is the one row that cannot move.** It changes how the model's *confidence* is reported, not what the model computes, so its accuracy cells are copies of the v2.1 cells by construction. Read it for the calibration error and the confidence-threshold behaviour, which the other rows do not have at all.
+* **v3.1 is the row that ships no weights at all.** It quantizes the frozen v3.0 graph, so its accuracy cells are copies of the v3.0 cells by construction and the row is not a new experiment: read it for what quantization itself moved - **99.55 % top-1 agreement** with the float32 graph (54 of 12,105 `testing` clips flip, on near ties), coverage moving **0.21 pt** at v3.0's unchanged `T` and `tau`, and a **74.1 % smaller file** (4.643 MB -> 1.202 MB) with **no CPU speed-up** (1.68x slower on the CPU provider). No accuracy gain is claimed for it, and no latency win is claimed anywhere.
 
 ---
 
@@ -246,8 +270,11 @@ python app.py
 python train.py       # trains v3.0; downloads Speech Commands and LibriSpeech on first run
 python evaluate.py    # fits T/tau -> configs/calibration/ + reports/model_v3.0/
 python export_onnx.py # optional: writes CommandSense_v3.0.onnx with T/tau in its metadata_props
+python quantize_int8.py # v3.1: builds the INT8 sibling -> checkpoints/model_v3.1/ + reports/model_v3.1/
 ```
 The first training run downloads Speech Commands v0.02 (≈2.3 GB) and LibriSpeech `train-clean-100` (≈6.3 GB). `train.py` caches the audio as `int16` in RAM and builds the spectrograms on the GPU, so an epoch takes ≈25–30 s on a T4 at batch size 256; `evaluate.py` then fits the single temperature `T` and the confidence threshold `tau` on the validation split.
+
+v3.1 needs nothing new on top of that: `python quantize_int8.py` reads the frozen v3.0 checkpoint, so it runs after `train.py` / `evaluate.py` and adds the INT8 artifacts without touching a weight. `python tests/test_v3_1_quantization.py` re-measures their fidelity, operating point, size and latency wherever it runs.
 
 ---
 

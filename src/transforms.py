@@ -1,29 +1,15 @@
 """GPU-side 3-channel feature extraction with train-only conditional augmentation.
 
-The v3.0 pipeline keeps raw ``int16`` audio in system RAM and performs every
-spectral operation on the accelerator, so the CPU never materializes a
-spectrogram. One ``nn.Module`` owns the whole front-end, and every step below
-runs on whatever device it is moved to (CUDA in production, CPU for the smoke
-test):
+Raw ``int16`` audio lives in system RAM and every spectral operation runs on the
+accelerator, so the CPU never materializes a spectrogram: cast to ``float32`` and
+normalize, optionally augment the waveform, then Log-Mel + Delta + Delta-Delta
+into ``[Batch, 3, n_mels, time_frames]``.
 
-1. cast ``int16`` -> ``float32`` and normalize by ``/ 32768.0`` (restores [-1, 1]),
-2. waveform augmentation (:class:`WaveformAugmentation`): per-clip pitch shift and
-   time shift, applied only in ``train()`` mode and never to ``_silence_`` clips,
-3. Mel-Spectrogram (channel 1, log-scaled to match ``AudioFeatureExtractor``),
-4. :func:`torchaudio.functional.compute_deltas` (channel 2, Delta),
-5. a second ``compute_deltas`` (channel 3, Delta-Delta),
-6. stack into ``[Batch, 3, n_mels, time_frames]``,
-7. dynamic SpecAugment (independent frequency + time masks per clip), also gated
-   away from ``_silence_`` clips.
-
-The augmentation is deliberately *conditional*: ``_silence_`` teaches the reject
+Augmentation is *conditional* and train-only: ``_silence_`` teaches the reject
 (OOD) boundary from raw background noise, so shifting or masking it would only
-blur that boundary. It is also entirely train-time - ``eval()`` short-circuits
-both augmentations, which keeps validation metrics stable and the exported ONNX
-graph deterministic.
-
-The module holds no learnable parameters (only the Mel filterbank buffers), so it
-never receives gradients.
+blur that boundary, and ``eval()`` short-circuits both augmentations, which keeps
+validation metrics stable and the exported ONNX graph deterministic. The module
+holds no learnable parameters, only the Mel filterbank buffers.
 """
 
 import os
@@ -59,9 +45,8 @@ from configs.config import (  # noqa: E402
     TIME_SHIFT_RATIO,
 )
 
-# Division applied to the int16 cache. 32768 (2**15) maps the full int16 range
-# back onto [-1, 1). The dataset quantizes with 32767, so the round-trip error
-# stays below one int16 step (~3e-5) - far below the mel filterbank's resolution.
+# 32768 (2**15) maps the full int16 range back onto [-1, 1). The dataset quantizes
+# with 32767, so the round-trip error stays below one int16 step (~3e-5).
 INT16_NORMALIZER = 32768.0
 
 
@@ -80,25 +65,11 @@ class WaveformAugmentation(nn.Module):
     ``_silence_`` clips, which keep the raw background noise the reject boundary
     is learnt from.
 
-    Two augmentations, both chosen to be cheap enough for the per-batch hot path
-    (measured on a 256 x 16000 cpu batch, vs a 80 ms mel+delta baseline):
-
-    * **Time-Shift** - one native :func:`torch.roll` (3 ms) rather than a
-      ``gather`` + zero-fill (24 ms). The wrap-around is left in place: over a
-      fixed 1.0 s window its artifact is a few samples of cross-fade at the
-      window edge, far cheaper than the index math it replaces.
-    * **Pitch-Shift** - ``PITCH_SHIFT_MODE = "spectral"`` (default) shifts the
-      STFT bins along the frequency axis and inverts (``stft -> roll -> istft``,
-      90 ms total). It is ~180x cheaper than the
-      :func:`torchaudio.functional.pitch_shift` phase vocoder, whose cost is
-      dominated by an internal ``AF.resample`` (~16.4 s per 256-clip batch).
-      ``PITCH_SHIFT_MODE = "vocoder"`` restores that higher-quality path, and
-      ``"off"`` disables pitch shifting entirely.
-
     Both shifts are drawn from a small discrete set, so clips sharing a value go
     through a single batched call: the loop count is bounded by the number of
     distinct values (2 for ``PITCH_SHIFT_SEMITONES = (-1, 1)``), never by the
-    batch size.
+    batch size. The default spectral pitch shift is ~180x cheaper than the phase
+    vocoder; see ``PITCH_SHIFT_MODE`` in ``configs/config.py``.
     """
 
     def __init__(
@@ -130,14 +101,14 @@ class WaveformAugmentation(nn.Module):
         self.p_time = p_time
         self.time_shift_ratio = time_shift_ratio
 
-        # Semitone -> STFT bin is a fixed, frequency-anchored mapping: resolving
-        # it once here keeps it out of the per-batch hot path.
+        # Semitone -> STFT bin is a fixed mapping solved once here, so it stays out
+        # of the per-batch hot path.
         self.pitch_bin_shifts = tuple(
             self._semitone_to_bins(semitone)
             for semitone in self.pitch_shift_semitones
         )
-        # Non-persistent (absent from state_dict, so checkpointing and the ONNX
-        # export are untouched) but still follows .to(device) with the module.
+        # Non-persistent: absent from state_dict, so checkpointing and the ONNX
+        # export are untouched.
         self.register_buffer(
             "_pitch_window",
             torch.hann_window(pitch_n_fft, periodic=True),
@@ -220,11 +191,11 @@ class WaveformAugmentation(nn.Module):
     ) -> torch.Tensor:
         """Batched pitch shift, grouped by the discrete shift values in use.
 
-        Gating is per clip (``p_pitch``), and a clip draws one of
-        ``pitch_shift_semitones``; clips that drew the same value then share a
-        single batched call, so the number of calls equals the number of distinct
-        values (2 with ``(-1, 1)``) whatever the batch size. What the call itself
-        does depends on ``pitch_mode`` - see :meth:`_spectral_shift` and
+        Gating is per clip (``p_pitch``) and a clip draws one of
+        ``pitch_shift_semitones``; clips that drew the same value share a single
+        batched call, so the number of calls equals the number of distinct values
+        (2 with ``(-1, 1)``) whatever the batch size. What the call itself does
+        depends on ``pitch_mode`` - see :meth:`_spectral_shift` and
         :meth:`_vocoder_shift`.
         """
         if self.p_pitch <= 0.0 or not self.pitch_shift_semitones:
@@ -322,10 +293,10 @@ class WaveformAugmentation(nn.Module):
         ``pitch_reference_hz``.
 
         A true pitch shift is frequency dependent (one semitone is ~59 Hz at
-        1 kHz but ~12 Hz at 200 Hz); a single fixed bin offset cannot follow
+        1 kHz but ~12 Hz at 200 Hz) and a single fixed bin offset cannot follow
         that, so the anchor is made explicit and reproducible: one semitone at the
-        reference frequency is ``ref * (2 ** (1/12) - 1)`` Hz, compared against
-        the bin width ``sample_rate / pitch_n_fft``. Never returns 0 so a nonzero
+        reference frequency is ``ref * (2 ** (1/12) - 1)`` Hz, compared against the
+        bin width ``sample_rate / pitch_n_fft``. Never returns 0, so a nonzero
         semitone can never degrade into a no-op.
         """
         if semitone == 0:
@@ -384,7 +355,6 @@ class AudioToThreeChannelMel(nn.Module):
         self.n_freq_masks = n_freq_masks
         self.n_time_masks = n_time_masks
 
-        # Registered buffers move with ``.to(device)`` / ``.cuda()``.
         self.mel_spectrogram = AT.MelSpectrogram(
             sample_rate=sample_rate,
             n_fft=n_fft,
@@ -393,9 +363,9 @@ class AudioToThreeChannelMel(nn.Module):
             n_mels=n_mels,
         )
 
-        # Waveform-level augmentation (pitch + time shift) runs first, on the
-        # normalized [-1, 1] audio. Its ``training`` flag mirrors this module's,
-        # so ``eval()`` here also switches the waveform augmentation off.
+        # Waveform augmentation (pitch + time shift) runs first, on the normalized
+        # [-1, 1] audio. Its ``training`` flag mirrors this module's, so ``eval()``
+        # here also switches the waveform augmentation off.
         self.waveform_augmentation = WaveformAugmentation(
             sample_rate=sample_rate,
             p_pitch=pitch_shift_prob,
@@ -405,8 +375,8 @@ class AudioToThreeChannelMel(nn.Module):
             time_shift_ratio=time_shift_ratio,
         )
 
-        # iid_masks=True draws an independent mask for every clip, which is what
-        # makes the augmentation dynamic per sample instead of sharing one hole.
+        # iid_masks=True draws an independent mask per clip, so the augmentation
+        # stays per-sample instead of sharing one hole across the batch.
         self.freq_masking = nn.ModuleList(
             AT.FrequencyMasking(freq_mask_param=freq_mask_param, iid_masks=True)
             for _ in range(n_freq_masks)
@@ -426,12 +396,11 @@ class AudioToThreeChannelMel(nn.Module):
     def forward(
         self, x: torch.Tensor, targets: torch.Tensor = None
     ) -> torch.Tensor:
-        # 1. int16 -> float32 and normalize.
         if x.dtype != torch.float32:
             x = x.to(torch.float32)
         x = x / INT16_NORMALIZER
 
-        if x.ndim == 2:  # [B, T] is accepted as single-channel audio
+        if x.ndim == 2:
             x = x.unsqueeze(1)
         if x.ndim != 3:
             raise ValueError(
@@ -440,29 +409,21 @@ class AudioToThreeChannelMel(nn.Module):
         if x.shape[1] != 1:  # defensive: downmix any stray channels
             x = x.mean(dim=1, keepdim=True)
 
-        # 2. Waveform-level augmentation (train only, never on '_silence_').
-        #    ``augment_mask`` is ``None`` when no labels were supplied, in which
-        #    case every clip is eligible.
+        # Train-only, and the '_silence_' rows are excluded by ``augment_mask``
+        # (``None`` when no labels were supplied, i.e. every clip is eligible).
         augment_mask = self._augment_mask(targets)
         if self.augment and self.waveform_augment:
             x = self.waveform_augmentation(x, augment_mask)
 
-        # MelSpectrogram consumes ``(..., time)``. Dropping the mono channel keeps
-        # the output ``[Batch, n_mels, frames]`` so stacking yields ``[Batch, 3, ...]``.
+        # MelSpectrogram consumes ``(..., time)``, so the mono channel is dropped.
         x = x.squeeze(1)
 
-        # 3. Log-Mel spectrogram (channel 1).
         log_mel = torch.log(self.mel_spectrogram(x) + 1e-6)
-
-        # 4./5. Delta and Delta-Delta along the time axis (channels 2 and 3).
         delta = AF.compute_deltas(log_mel)
         delta2 = AF.compute_deltas(delta)
-
-        # 6. Stack channels: [Batch, 3, n_mels, time_frames].
         features = torch.stack((log_mel, delta, delta2), dim=1)
 
-        # 7. Dynamic SpecAugment, directly on the features' device and gated so
-        #    the '_silence_' rows stay exactly as they were extracted.
+        # Gated so the '_silence_' rows stay exactly as they were extracted.
         if self.spec_augment_enabled:
             features = self._apply_spec_augment(features, augment_mask)
 
