@@ -1,4 +1,4 @@
-"""Throwaway smoke test for the evaluate.py helpers (no dataset touched)."""
+"""Throwaway smoke test for the evaluate.py helpers (no dataset touched)"""
 import os
 import sys
 import tempfile
@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
- 
+
 import evaluate
 from configs.config import MODEL_VERSION, THRESHOLD_CRITERION, THRESHOLD_MIN_COVERAGE
 from src import calibration

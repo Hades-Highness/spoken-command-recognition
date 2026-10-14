@@ -2,11 +2,10 @@
 
 Run with:  python app.py
 
-v2.2 adds a live view of the confidence calibration: the fitted temperature ``T``
-is applied to the raw logits before the softmax, and a ``tau`` slider re-applies
-the confidence threshold without reloading the model. Clips whose calibrated
-top-1 probability stays below ``tau`` are rejected with the project's
-``_unknown_`` label and flagged in the UI.
+The fitted temperature ``T`` is applied to the raw logits before the softmax, and
+a ``tau`` slider re-applies the confidence threshold without reloading the model:
+clips whose calibrated top-1 probability stays below ``tau`` are rejected with the
+project's ``_unknown_`` label and flagged in the UI.
 """
 
 import gradio as gr
@@ -28,13 +27,11 @@ try:
 except Exception as exc:  # missing checkpoint, missing labels, ...
     init_error = f"{type(exc).__name__}: {exc}"
 
-# The inference engine is the single source of truth for which backends exist,
-# so the UI can never offer a backend the code cannot serve.
+# Derived from the engine, so the UI can never offer a backend the code cannot serve.
 BACKENDS = ["ONNX", "PyTorch (.pth)"] if (inferencer and "onnx" in inferencer.available_backends) \
     else ["PyTorch (.pth)"]
 
-# The fitted values come from configs/calibration/*_calibration_v2.2.json; a
-# missing or partial file leaves the configured defaults in place.
+# A missing or partial calibration file leaves the configured defaults in place.
 INITIAL_TAU = (
     float(inferencer.confidence_threshold) if inferencer else float(DEFAULT_CONFIDENCE_THRESHOLD)
 )
@@ -149,8 +146,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         inputs=[audio_input, backend_radio, threshold_slider],
         outputs=[label_output, summary_output, status_output],
     )
-    # Re-decide on the same clip when the slider is released: T is already
-    # fitted, so only the threshold comparison changes.
+    # T is already fitted, so a release only re-runs the threshold comparison.
     threshold_slider.release(
         fn=predict_command,
         inputs=[audio_input, backend_radio, threshold_slider],

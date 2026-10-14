@@ -1,35 +1,9 @@
-"""Raw-audio dataset for the CommandSense v3.0 memory-optimized pipeline.
+"""Raw-audio dataset for the CommandSense v3.0 pipeline.
 
-The v3.0 front-end moves spectral feature extraction to the GPU
-(``src/transforms.py``), so the dataset no longer stores 3-channel spectrograms
-in RAM. Instead every clip is standardized at load time and cached as
-``torch.int16``:
-
-* stereo is downmixed to mono (``[1, T]``),
-* audio is resampled to 16 kHz when necessary,
-* clips are zero-padded or cropped to exactly 1.0 s (``TARGET_SAMPLES``).
-
-16000 samples * 2 bytes = 32 KB per clip, so the whole training split stays well
-under 4 GB - roughly a quarter of the previous float32 spectrogram cache. The
-pad/crop policy itself still lives in :func:`src.utils.prepare_waveform`, so
-training and serving cannot drift apart.
-
-``.wav`` and ``.flac`` are handled seamlessly through
-:func:`src.utils.load_audio_file` (a ``torchaudio`` wrapper with a soundfile /
-PyAV fallback), so container support is identical for the Speech Commands and
-LibriSpeech sources.
-
-``return_audio=False`` preserves the legacy contract used by ``evaluate.py``: the
-dataset then serves the pre-computed ``[3, n_mels, frames]`` features produced by
-:class:`src.models.AudioFeatureExtractor`. Those features are derived from the
-same int16 cache, so evaluation and training see identical inputs.
-
-Dataset *provisioning* is centralized here too. Before anything is indexed or
-cached, :func:`ensure_speech_commands` and :func:`ensure_librispeech` make sure
-the raw ``.tar.gz`` archives have been downloaded (with ``aria2c`` when it is on
-``PATH``, otherwise ``urllib``) and extracted under ``./data/``. The helpers check
-their target directory first, so every entry point is idempotent and no caller
-(``train.py``, ``evaluate.py``) has to know where the bytes come from.
+Clips are standardized to 16 kHz mono, exactly 1.0 s, and cached as
+``torch.int16``; the 3-channel features are extracted on the GPU by
+``src/transforms.py``. Dataset provisioning (download and extraction under
+``./data/``) is centralized here and idempotent.
 """
 
 import gc
@@ -55,26 +29,15 @@ from src.utils import load_audio_file, prepare_waveform  # noqa: E402
 
 VALID_SUBSETS = ("training", "validation", "testing")
 
-# ---------------------------------------------------------------------------
-# Centralized dataset provisioning
-# ---------------------------------------------------------------------------
-# Upstream archives. Speech Commands is a single tarball; LibriSpeech ships one
-# archive per subset (dev-clean, train-clean-100, ...).
 SPEECH_COMMANDS_URL = "https://download.tensorflow.org/data/speech_commands_v0.02.tar.gz"
 LIBRISPEECH_URL_TEMPLATE = "https://www.openslr.org/resources/12/{subset}.tar.gz"
 
-# Extraction roots. Both archives already carry their own top-level directory, so
-# extracting Speech Commands under ``./data/SpeechCommands`` and LibriSpeech under
-# ``./data`` reproduces exactly the layout torchaudio expects with download=False:
-#   data/SpeechCommands/speech_commands_v0.02   (SPEECHCOMMANDS)
-#   data/LibriSpeech/<subset>                   (LIBRISPEECH)
+# Both archives carry their own top-level directory, so extracting under these
+# roots reproduces the layout torchaudio expects with download=False.
 SPEECH_COMMANDS_ROOT = os.path.join(str(DATA_DIR), "SpeechCommands")
 SPEECH_COMMANDS_DIR = os.path.join(SPEECH_COMMANDS_ROOT, "speech_commands_v0.02")
 LIBRISPEECH_ROOT = os.path.join(str(DATA_DIR), "LibriSpeech")
 
-# LibriSpeech subset backing the ``_unknown_`` rejection samples for each Speech
-# Commands split: training uses the large clean-100 set, validation/testing reuse
-# the small dev-clean set.
 LIBRISPEECH_SUBSETS = ("dev-clean", "train-clean-100")
 LIBRISPEECH_SPLIT_BY_SUBSET = {
     "training": "train-clean-100",
@@ -82,13 +45,9 @@ LIBRISPEECH_SPLIT_BY_SUBSET = {
     "testing": "dev-clean",
 }
 
-# Containers the loader understands. Both are decoded natively by
-# torchaudio/soundfile; keeping the set explicit lets directory scans stay in
-# sync with the background-noise and LibriSpeech sources.
 SUPPORTED_AUDIO_EXTENSIONS = (".wav", ".flac")
 
-# int16 quantization constants. The GPU front-end divides by INT16_NORMALIZER
-# (see ``src/transforms.py``) to restore the [-1, 1] scale.
+# INT16_NORMALIZER is the divisor src/transforms.py uses to restore [-1, 1].
 INT16_SCALE = 32767.0
 INT16_NORMALIZER = 32768.0
 
@@ -96,19 +55,11 @@ INT16_NORMALIZER = 32768.0
 def _download_with_urllib(url: str, destination: str) -> None:
     """Single-connection fallback used when ``aria2c`` is unavailable.
 
-    Standard-library :func:`urllib.request.urlretrieve` with a ``tqdm`` progress
-    bar so the fallback is not noticeably worse to watch than ``aria2c``.
-
-    The transfer is retried once over an unverified TLS context when - and only
-    when - the failure is a certificate validation error.
-    ``download.tensorflow.org`` intermittently serves a chain the local trust
-    store cannot verify, so the retry keeps dataset provisioning usable instead
-    of aborting on a known, transient CDN issue. Any other
-    :class:`urllib.error.URLError` is re-raised untouched, so genuine network
-    problems are never masked.
+    Retried once over an unverified TLS context only for certificate-validation
+    failures (download.tensorflow.org intermittently serves an unverifiable
+    chain); any other ``URLError`` is re-raised.
     """
-    # Imported locally: ``aria2c`` is the primary path and most runs never reach
-    # this fallback, so the SSL plumbing stays out of the module import cost.
+    # Imported locally to keep SSL plumbing out of the module import cost.
     import ssl
     import urllib.error
 
@@ -129,9 +80,7 @@ def _download_with_urllib(url: str, destination: str) -> None:
         try:
             urllib.request.urlretrieve(url, destination, reporthook=_hook)
         except urllib.error.URLError as exc:
-            # Only a TLS trust failure triggers the retry; a DNS error, timeout
-            # or HTTP status error is re-raised so real network problems stay
-            # visible instead of being silently swallowed.
+            # Only a TLS trust failure is retried; other errors are re-raised.
             reason = str(exc)
             if "CERTIFICATE_VERIFY_FAILED" not in reason and "ssl.c" not in reason:
                 raise
@@ -142,15 +91,11 @@ def _download_with_urllib(url: str, destination: str) -> None:
                 f"    {reason}\n"
                 "[!] Retrying once with an unverified SSL context."
             )
-            # A certificate error aborts the connection before any block is read,
-            # so the bar is normally still unset; close it defensively anyway so
-            # the retry starts from a clean progress bar.
             if progress["bar"] is not None:
                 progress["bar"].close()
                 progress["bar"] = None
 
-            # Unverified context + globally installed opener, as a last resort
-            # for this known CDN certificate problem.
+            # Last resort for the known CDN certificate issue.
             context = ssl._create_unverified_context()
             opener = urllib.request.build_opener(
                 urllib.request.HTTPSHandler(context=context)
@@ -182,13 +127,8 @@ def _extract_archive(archive_path: str, output_dir: str) -> None:
 def _download_archive(url: str, output_dir: str) -> str:
     """Download ``url`` into ``output_dir`` and extract the ``.tar.gz`` there.
 
-    ``aria2c -x 16 -s 16 -d <output_dir> <url>`` is preferred because the 16
-    parallel connections saturate the link far better than a single stream; when
-    ``aria2c`` is missing (or fails) the download degrades to
-    :func:`_download_with_urllib`. The archive is kept on disk so reruns can skip
-    the transfer, and the ``.tar.gz`` is extracted immediately afterwards.
-
-    Returns the path of the downloaded archive.
+    ``aria2c`` is preferred for its parallel connections, with
+    :func:`_download_with_urllib` as the fallback. Returns the archive path.
     """
     os.makedirs(output_dir, exist_ok=True)
     filename = os.path.basename(urlparse(url).path)
@@ -221,11 +161,7 @@ def _download_archive(url: str, output_dir: str) -> str:
 
 
 def ensure_speech_commands() -> str:
-    """Return ``data/SpeechCommands/speech_commands_v0.02``, fetching it if absent.
-
-    Idempotent: checks the target directory before touching the network, so a
-    second call is a no-op.
-    """
+    """Return ``data/SpeechCommands/speech_commands_v0.02``, fetching it if absent."""
     if os.path.isdir(SPEECH_COMMANDS_DIR):
         print(f"[=] Speech Commands already present: {SPEECH_COMMANDS_DIR}")
         return SPEECH_COMMANDS_DIR
@@ -242,12 +178,7 @@ def ensure_speech_commands() -> str:
 
 
 def ensure_librispeech(subset: str = "train-clean-100") -> str:
-    """Return ``data/LibriSpeech/<subset>``, fetching the split if absent.
-
-    Idempotent: checks the target directory before touching the network. The
-    archive is downloaded into ``./data`` and extracted there, which yields the
-    ``data/LibriSpeech/<subset>`` path torchaudio's ``LIBRISPEECH`` walks.
-    """
+    """Return ``data/LibriSpeech/<subset>``, fetching the split if absent."""
     if subset not in LIBRISPEECH_SUBSETS:
         raise ValueError(
             f"Unsupported LibriSpeech subset '{subset}'; expected one of "
@@ -276,11 +207,7 @@ def quantize_int16(audio: torch.Tensor) -> torch.Tensor:
 
 
 def waveform_to_int16(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-    """Standardize ``(waveform, sample_rate)`` and quantize it to int16.
-
-    ``prepare_waveform`` owns the downmix / resample / pad-crop policy, so this
-    function only adds the storage dtype conversion. Returns ``[1, TARGET_SAMPLES]``.
-    """
+    """Standardize ``(waveform, sample_rate)`` into an int16 ``[1, TARGET_SAMPLES]``."""
     return quantize_int16(prepare_waveform(waveform, sample_rate))
 
 
@@ -298,11 +225,8 @@ def list_audio_files(directory: str) -> list:
 class SpeechCommandsDataset(Dataset):
     """Google Speech Commands v0.02 extended to 37 classes (35 + 2 rejection).
 
-    ``_silence_`` is built from the ``_background_noise_`` recordings and
-    ``_unknown_`` from real out-of-vocabulary LibriSpeech speech, exactly as in
-    the v2.x releases. Both are standardized and cached as int16 like every other
-    clip - no synthetic noise fallback, which would make the rejection class
-    meaningless.
+    ``_silence_`` comes from the ``_background_noise_`` recordings and
+    ``_unknown_`` from real out-of-vocabulary LibriSpeech speech.
     """
 
     def __init__(
@@ -313,8 +237,6 @@ class SpeechCommandsDataset(Dataset):
         split: str = None,
     ):
         super().__init__()
-        # ``split`` is an accepted alias for ``subset`` (torchaudio's own naming);
-        # callers may use either keyword.
         if split is not None:
             subset = split
         if subset not in VALID_SUBSETS:
@@ -322,13 +244,10 @@ class SpeechCommandsDataset(Dataset):
 
         self.subset = subset
         self.cache_in_ram = cache_in_ram
-        # v3.0 trains on raw int16 audio; evaluate.py opts into the legacy
-        # pre-computed feature contract with return_audio=False.
+        # evaluate.py sets return_audio=False for the legacy pre-computed features.
         self.return_audio = return_audio
 
-        # Centralized, idempotent provisioning. Both datasets are downloaded and
-        # extracted under ./data/ *before* indexing or caching, so no split can be
-        # built from a half-present tree.
+        # Provisioning runs before indexing so no split sees a half-present tree.
         self.librispeech_subset = LIBRISPEECH_SPLIT_BY_SUBSET[subset]
         ensure_speech_commands()
         ensure_librispeech(self.librispeech_subset)
@@ -341,12 +260,8 @@ class SpeechCommandsDataset(Dataset):
             subset=subset,
         )
 
-        # Single decode pass: collect labels once and reuse them for both the
-        # class list and the target tensor.
         raw_labels = [sample[2] for sample in self.raw_dataset]
         self.base_labels = sorted(set(raw_labels))
-
-        # Extended 37 labels list
         self.labels = sorted(self.base_labels + ["_silence_", "_unknown_"])
 
         if len(self.labels) != NUM_CLASSES:
@@ -357,8 +272,6 @@ class SpeechCommandsDataset(Dataset):
 
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
 
-        # Extra samples buffer for _silence_ and _unknown_ classes only, already
-        # standardized to int16 [1, TARGET_SAMPLES].
         self.extra_samples = []
         self._generate_extra_samples()
 
@@ -371,8 +284,6 @@ class SpeechCommandsDataset(Dataset):
             dtype=torch.long,
         )
 
-        # int16 audio buffer [num_total, 1, TARGET_SAMPLES] (v3.0). The feature
-        # cache [num_total, 3, n_mels, frames] is only built for the legacy path.
         self.audio = None
         self.cached_features = None
         self.feature_extractor = AudioFeatureExtractor()
@@ -383,7 +294,6 @@ class SpeechCommandsDataset(Dataset):
             else:
                 self._cache_features_in_ram()
 
-    # ------------------------------------------------------------------ caching
     def _cache_audio_in_ram(self):
         """Preload every clip into a single int16 tensor living in system RAM."""
         gigabytes = self.num_total * TARGET_SAMPLES * 2 / 1e9
@@ -405,7 +315,7 @@ class SpeechCommandsDataset(Dataset):
         for offset, (sample, _) in enumerate(self.extra_samples):
             self.audio[self.num_raw + offset] = sample
 
-        # The int16 buffer now owns every clip: drop the per-sample list.
+        # The int16 buffer owns every clip now; drop the per-sample list.
         self.extra_samples = []
         gc.collect()
 
@@ -430,12 +340,11 @@ class SpeechCommandsDataset(Dataset):
 
         print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
-    # -------------------------------------------------- rejection class sources
     def _generate_extra_samples(self):
         """Generates _silence_ and _unknown_ samples using real audio sources."""
         num_extra_target = int(len(self.raw_dataset) * 0.05)  # ~5% of split size
 
-        # 1. Inject _silence_ samples (split noise sources to prevent leakage)
+        # 1. _silence_ samples; the noise sources are split to prevent leakage.
         bg_dir = os.path.join(SPEECH_COMMANDS_DIR, "_background_noise_")
         if not os.path.exists(bg_dir):
             raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
@@ -448,7 +357,6 @@ class SpeechCommandsDataset(Dataset):
                 f"found {len(bg_files)}."
             )
 
-        # Partition background noise files: 4 files for training, rest for val/test
         if self.subset == "training":
             selected_bg = bg_files[:4]
         else:
@@ -459,15 +367,14 @@ class SpeechCommandsDataset(Dataset):
             bg_file = random.choice(selected_bg)
             waveform, sample_rate = load_audio_file(bg_file)
 
-            # Standardize to 16 kHz / mono / 1.0 s, then apply a random gain so
-            # the silence class spans a range of quiet levels.
+            # Random gain so the silence class spans a range of quiet levels.
             chunk = prepare_waveform(waveform, sample_rate)
             chunk = chunk * random.uniform(0.1, 1.0)
 
             self.extra_samples.append((quantize_int16(chunk), "_silence_"))
             silence_count += 1
 
-        # 2. Inject _unknown_ samples from LibriSpeech (real OOV speech)
+        # 2. _unknown_ samples from LibriSpeech (real OOV speech).
         ls_subset = self.librispeech_subset
         try:
             librispeech_ds = torchaudio.datasets.LIBRISPEECH(
@@ -484,7 +391,6 @@ class SpeechCommandsDataset(Dataset):
                 if unknown_count >= num_extra_target:
                     break
                 waveform, sample_rate, _, _, _, _ = librispeech_ds[idx]
-                # prepare_waveform resamples / downmixes / crops the 1.0 s clip.
                 self.extra_samples.append(
                     (waveform_to_int16(waveform, sample_rate), "_unknown_")
                 )
@@ -502,18 +408,13 @@ class SpeechCommandsDataset(Dataset):
             f"_silence_={silence_count}, _unknown_={unknown_count}"
         )
 
-    # -------------------------------------------------------------- accessors
     def _get_raw_audio(self, idx: int):
         """Fetch ``(waveform, sample_rate, label)`` for a raw Speech Commands clip."""
         waveform, sample_rate, label, _, _ = self.raw_dataset[idx]
         return waveform, sample_rate, label
 
     def _standardized_audio(self, idx: int) -> torch.Tensor:
-        """Return the int16 clip ``[1, TARGET_SAMPLES]`` for ``idx``.
-
-        Serves the RAM cache when present, otherwise standardizes on demand (and
-        reuses the int16 ``_silence_`` / ``_unknown_`` buffer built at init).
-        """
+        """Return the int16 clip ``[1, TARGET_SAMPLES]`` for ``idx``."""
         if self.audio is not None:
             return self.audio[idx]
         if idx < self.num_raw:
@@ -533,9 +434,7 @@ class SpeechCommandsDataset(Dataset):
     def __getitem__(self, idx: int):
         target = self.targets[idx]
         if self.return_audio:
-            # v3.0: raw int16 [1, TARGET_SAMPLES]; features are built on the GPU.
             return self._standardized_audio(idx), target
-        # Legacy contract for evaluate.py: pre-computed [3, n_mels, frames].
         if self.cached_features is not None:
             return self.cached_features[idx], target
         features = self._features_from_audio(self._standardized_audio(idx))

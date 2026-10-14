@@ -1,22 +1,15 @@
 """Post-hoc confidence calibration and confidence thresholding (v2.2).
 
-This module implements the whole v2.2 feature set without touching a single
-model weight - the v2.1 checkpoint is frozen and only its logits are rescaled:
+The whole v2.2 feature set works without touching a single model weight - the
+v2.1 checkpoint is frozen and only its logits are rescaled. A single scalar
+``T > 0`` (temperature scaling, Guo et al., 2017) is fitted on the held-out
+validation split by minimising the negative log-likelihood, the calibration
+diagnostics (ECE, MCE, reliability diagram) measure the result, and a threshold
+sweep (coverage, retained accuracy, FRR/FAR) picks the operating point ``tau``
+that :func:`apply_confidence_threshold` serves (``max softmax < tau`` -> reject).
 
-* :class:`TemperatureScaler` - temperature scaling (Guo et al., 2017). A single
-  scalar ``T > 0`` divides the logits before the softmax and is fitted on the
-  held-out validation split by minimising the negative log-likelihood.
-* :func:`expected_calibration_error` and :func:`reliability_diagram` - the
-  confidence calibration diagnostics, measured with ``M`` equal-width
-  probability bins.
-* :func:`threshold_metrics` and :func:`sweep_thresholds` - coverage, retained
-  accuracy, false rejection rate (FRR) and false acceptance rate (FAR) for a
-  confidence threshold ``tau``; :func:`select_threshold` picks the operating
-  point according to a named criterion.
-* :func:`apply_confidence_threshold` - the online decision used by
-  ``src/inference.py`` and ``app.py`` (``max softmax < tau`` -> reject).
-* :func:`save_calibration` / :func:`load_calibration` - the deployment artifact
-  consumed by the inferencer and mirrored into the ONNX metadata.
+:func:`save_calibration` / :func:`load_calibration` own the deployment artifact
+consumed by the inferencer and mirrored into the ONNX metadata.
 
 Every helper accepts NumPy arrays or PyTorch tensors and is free of dataset
 imports, so the offline calibration pass (``evaluate.py``) and the served
@@ -86,9 +79,6 @@ CALIBRATION_METADATA_KEYS = (
 ONNX_METADATA_PREFIX = "commandsense.calibration."
 
 
-# ---------------------------------------------------------------------------
-# Small conversion / maths helpers
-# ---------------------------------------------------------------------------
 def as_numpy(array) -> np.ndarray:
     """Return a detached ``float64`` NumPy view of a tensor or array."""
     if isinstance(array, torch.Tensor):
@@ -127,9 +117,6 @@ def accuracy(probabilities, targets) -> float:
     return float(np.mean(np.argmax(probabilities, axis=-1) == targets))
 
 
-# ---------------------------------------------------------------------------
-# Temperature scaling
-# ---------------------------------------------------------------------------
 class TemperatureScaler(nn.Module):
     """Single-parameter temperature fitted on a held-out split.
 
@@ -213,9 +200,6 @@ def fit_temperature(logits, targets, **kwargs) -> float:
     return TemperatureScaler().fit(logits, targets, **kwargs).temperature
 
 
-# ---------------------------------------------------------------------------
-# Expected Calibration Error and reliability diagrams
-# ---------------------------------------------------------------------------
 def reliability_diagram(probabilities, targets, n_bins: int = CALIBRATION_BINS) -> dict:
     """Bin-wise calibration statistics of a softmax distribution.
 
@@ -291,9 +275,6 @@ def top_label_confidence(probabilities):
     return confidence, index
 
 
-# ---------------------------------------------------------------------------
-# Confidence thresholding
-# ---------------------------------------------------------------------------
 def default_thresholds(step: float = CONFIDENCE_THRESHOLD_STEP) -> np.ndarray:
     """Evenly spaced thresholds covering ``[0.0, 1.0]`` inclusive."""
     step = float(step)
@@ -448,9 +429,6 @@ def apply_confidence_threshold(
     }
 
 
-# ---------------------------------------------------------------------------
-# Calibration artifact (deployment metadata)
-# ---------------------------------------------------------------------------
 def build_calibration_metadata(
     temperature: float,
     confidence_threshold: float,

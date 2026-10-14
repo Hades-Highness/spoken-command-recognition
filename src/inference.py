@@ -1,35 +1,27 @@
 """Checkpoint loading and prediction, with an optional ONNX Runtime backend.
 
-Resolution order for the checkpoint:
+The checkpoint is resolved from
+``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical) and then
+``checkpoints/<MODEL_NAME>_<version>.pth`` (legacy layout). The backend is one of
+``"onnx"`` (ONNX Runtime, needs the matching ``.onnx`` file), ``"pytorch"`` or
+``"auto"`` (ONNX when the file exists and loads, PyTorch otherwise).
 
-1. ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth``  (canonical)
-2. ``checkpoints/<MODEL_NAME>_<version>.pth``                  (legacy layout)
+Confidence calibration (v2.2): both backends return raw logits and the temperature
+``T`` is applied to them in Python (``softmax(logits / T)``), so the two backends
+score identically and the exported graph never has to be rebuilt when ``T`` or the
+threshold changes. Every prediction also carries a confidence-threshold decision:
+when the calibrated top-1 probability stays below ``tau``, the served label becomes
+the reject label (``REJECT_LABEL``) and ``is_low_confidence`` is set.
 
-Backend selection:
-
-* ``"onnx"``   - ONNX Runtime, requires the matching ``.onnx`` file.
-* ``"pytorch"`` - PyTorch checkpoint.
-* ``"auto"``   - ONNX when the file exists and loads, PyTorch otherwise.
-
-Confidence calibration (v2.2):
-
-Both backends return raw logits, and the temperature ``T`` is applied to them in
-Python (``softmax(logits / T)``), so the two backends score identically and the
-exported graph never has to be rebuilt when ``T`` or the threshold changes. Every
-prediction also carries a confidence-threshold decision: when the calibrated
-top-1 probability stays below ``tau``, the served label becomes the reject label
-(``REJECT_LABEL``) and ``is_low_confidence`` is set.
-
-The payload is discovered at start-up, ``configs/calibration/`` first
-(``CommandSense_calibration_v2.2.json``), then the version's checkpoint folder.
+The payload is discovered at start-up, ``configs/calibration/`` first, then the
+version's checkpoint folder.
 
 Safety fallback: when no calibration file can be read - absent, unreadable or
 holding values the runtime cannot apply - the inferencer falls back on
-``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead
-of raising. Raw logits are then served and nothing is rejected for low
-confidence, which is exactly the v2.1 decision rule, so a missing
-``CommandSense_calibration_v2.2.json`` degrades the release instead of breaking
-the application.
+``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead of
+raising. Raw logits are then served and nothing is rejected for low confidence,
+which is exactly the v2.1 decision rule, so a missing calibration file degrades the
+release instead of breaking the application.
 """
 
 import json
@@ -108,7 +100,7 @@ class CommandInferencer:
         self.feature_extractor = AudioFeatureExtractor().to(self.device)
         self.feature_extractor.eval()
 
-        # Calibration state. Explicit arguments win over the calibration file,
+        # Calibration state: explicit arguments win over the calibration file,
         # which in turn wins over the defaults from configs/config.py.
         self.calibration = {}
         self.calibration_source = None
@@ -141,7 +133,6 @@ class CommandInferencer:
             ),
         )
 
-    # ----------------------------------------------------------- calibration
     def load_calibration(self, temperature=None, confidence_threshold=None) -> dict:
         """Load ``T``/``tau`` from the version's calibration JSON.
 
@@ -228,7 +219,6 @@ class CommandInferencer:
         elif "confidence_threshold" in self.calibration:
             self.confidence_threshold = float(self.calibration["confidence_threshold"])
 
-    # ------------------------------------------------------------------ paths
     def _resolve_checkpoint(self, checkpoint_path):
         candidates = [
             checkpoint_path,
@@ -279,7 +269,6 @@ class CommandInferencer:
         except ImportError:
             return False
 
-    # --------------------------------------------------------------- backends
     def _load_pytorch(self):
         if self._torch_model is not None:
             return
@@ -347,7 +336,6 @@ class CommandInferencer:
     def is_ready(self) -> bool:
         return bool(self.available_backends)
 
-    # -------------------------------------------------------------- inference
     def predict(
         self,
         audio_path: str,

@@ -1,17 +1,10 @@
 """Export the deployment graph to ONNX and stamp the calibration onto it.
 
-``CommandSense v3.0`` trains its own weights and fits its own temperature ``T`` and
-confidence threshold ``tau``, so one ``MODEL_VERSION`` keys every artifact of the
-release. Raw logits stay raw inside ONNX - ``T`` and ``tau`` are applied by
-``src/inference.py`` at runtime, which is why changing the threshold never
-requires a re-export. What the export adds to the file is *documentation*: the
-fitted temperature, the chosen threshold and the calibration quality are written
-into ``metadata_props`` under the ``commandsense.calibration.`` namespace.
-
-Resolution order for the checkpoint being exported:
-
-1. ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth``  (canonical layout)
-2. ``checkpoints/<MODEL_NAME>_<version>.pth``                 (legacy layout)
+Raw logits stay raw inside ONNX - ``T`` and ``tau`` are applied by
+``src/inference.py`` at runtime, so changing the threshold never needs a
+re-export. What the export adds to the file is *documentation*: the fitted
+temperature, the chosen threshold and the calibration quality, written into
+``metadata_props`` under the ``commandsense.calibration.`` namespace.
 
 Run with:  python export_onnx.py
 """
@@ -32,10 +25,8 @@ from configs.config import (
 from src import calibration
 from src.models import CommandSense
 
-# torch.onnx prints progress messages containing non-ASCII glyphs. When stdout is
-# a pipe, Python falls back on the legacy console code page (cp1252 on Windows)
-# and those prints would raise UnicodeEncodeError in the middle of the export, so
-# the stream is switched to UTF-8 first.
+# torch.onnx prints non-ASCII glyphs; on a pipe (cp1252 on Windows) those prints
+# would raise UnicodeEncodeError mid-export, so switch the streams to UTF-8 first.
 for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
@@ -73,8 +64,7 @@ def export_to_onnx():
 
     print(f"[*] Exporting weights <- {checkpoint_path}")
 
-    # The graph is written next to the checkpoint it comes from, which is also
-    # where src/inference.py looks for it.
+    # Written next to the checkpoint, where src/inference.py looks for it.
     onnx_path = os.path.join(
         os.path.dirname(checkpoint_path), f"{MODEL_NAME}_{MODEL_VERSION}.onnx"
     )
@@ -129,8 +119,7 @@ def embed_calibration_metadata(onnx_path: str, version: str = MODEL_VERSION):
     props = calibration.metadata_to_onnx_props(metadata)
     onnx_model = onnx.load(onnx_path, load_external_data=False)
 
-    # Idempotent: refresh only the calibration namespace and keep foreign entries
-    # such as the producer information torch adds during export.
+    # Idempotent: refresh the calibration namespace, keep foreign entries (producer).
     prefix = calibration.ONNX_METADATA_PREFIX
     kept = [prop for prop in onnx_model.metadata_props if not prop.key.startswith(prefix)]
     del onnx_model.metadata_props[:]
@@ -162,7 +151,6 @@ def verify_onnx_model(onnx_path: str):
     input_tensor = onnx_model.graph.input[0]
     shape = [dim.dim_value for dim in input_tensor.type.tensor_type.shape.dim]
     
-    # Check input channels shape: [batch_size, 3, 64, 63]
     num_channels = shape[1]
     assert num_channels == 3, f"[!] Export Error: Expected 3 input channels, got {num_channels}"
     

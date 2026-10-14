@@ -1,10 +1,10 @@
 """Audio I/O and feature extraction - single source of truth.
 
-Both training (``src/dataset.py``), evaluation (``evaluate.py``) and inference
-(``src/inference.py``) build their features through :class:`AudioFeatureExtractor`
-and :func:`prepare_waveform` defined here. Nothing else may re-implement the
-pipeline: duplicated preprocessing is how a model silently degrades between
-training and serving.
+Training (``src/dataset.py``), evaluation (``evaluate.py``) and inference
+(``src/inference.py``) all build their features through
+:class:`AudioFeatureExtractor` and :func:`prepare_waveform` defined here:
+duplicated preprocessing is how a model silently degrades between training and
+serving.
 """
 
 import logging
@@ -23,14 +23,9 @@ from src.models import AudioFeatureExtractor  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# torchaudio.load compatibility shim
-# ---------------------------------------------------------------------------
 # Recent torchaudio releases route ``load`` through TorchCodec, which is not
-# installed everywhere; and clip formats produced by browsers (WebM/Opus) are
-# not readable by libsndfile either. The wrapper below keeps the native loader
-# when it works and falls back to soundfile otherwise, so that dataset reading
-# and file inference keep working in both situations.
+# installed everywhere, and browser containers (WebM/Opus) are not readable by
+# libsndfile either; this shim keeps the native loader when it works.
 def _install_load_fallback() -> None:
     if getattr(torchaudio, "_commandsense_load_patch", False):
         return
@@ -55,9 +50,6 @@ def _install_load_fallback() -> None:
 _install_load_fallback()
 
 
-# ---------------------------------------------------------------------------
-# Audio loading
-# ---------------------------------------------------------------------------
 def _load_with_pyav(filepath: str):
     """Decode containers libsndfile cannot open (WebM/Opus from a browser)."""
     import av  # optional dependency, imported lazily
