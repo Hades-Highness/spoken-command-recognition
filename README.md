@@ -15,10 +15,12 @@
   <a href="#results">Results</a> •
   <a href="#model-cards">Model Cards</a> •
   <a href="#pipeline">Pipeline</a> •
+  <a href="#repository-layout">Repository Layout</a> •
   <a href="#quickstart">Quickstart</a> •
   <a href="#training">Training</a> •
-  <a href="#deployment-v31">Deployment (v3.1)</a> •
+  <a href="#evaluation">Evaluation</a> •
   <a href="#datasets">Datasets</a> •
+  <a href="#reproducibility-and-limitations">Reproducibility</a> •
   <a href="#citation">Citation</a> •
   <a href="#licence">Licence</a>
 </p>
@@ -27,9 +29,9 @@
 
 ## Overview
 
-CommandSense is an end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition. It features a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary (OOV) speech. 
+CommandSense is an end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition. It features a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary (OOV) speech.
 
-The project documents a deliberate evolution from a naive baseline to a production-ready, memory-optimized, and quantized system. The current release (**v3.1**) is an edge-optimized deployment sibling of **v3.0**, featuring a heavily optimized INT8 artifact for ONNX Runtime Web and edge deployment, while keeping the v3.0 float32 weights frozen.
+The repository documents each released version with its own model card, metrics and artifacts. The current release (**v3.1**) is a self-contained edge-optimized deployment bundle featuring a heavily optimized INT8 artifact for ONNX Runtime Web and edge deployment, while preserving the v3.0 float32 weights and predictive fidelity.
 
 **What this repository is:** a reproducible pipeline (training, evaluation, ONNX/PyTorch inference, INT8 quantization, web demo), the metrics and calibration artifacts of all previous versions, and a model card per version.
 
@@ -43,30 +45,36 @@ The project documents a deliberate evolution from a naive baseline to a producti
 
 | Metric | Value | Source of truth |
 | :-- | :-- | :-- |
-| **Artifact Size (INT8)** | **1.20 MB** (74.1% reduction from v3.0) | `checkpoints/model_v3.1/CommandSense_v3.1_int8.onnx` |
-| **Top-1 Agreement** | **99.55%** (vs. float32 v3.0 graph) | `quantize_int8.py` evaluation logs |
+| **Artifact Size (INT8)** | **1.20 MB** (74.1% reduction from float32) | `checkpoints/model_v3.1/CommandSense_v3.1_int8.onnx` |
+| **Top-1 Agreement** | **99.55%** (vs. float32 graph) | `quantize_int8.py` evaluation logs |
 | **Test Accuracy (35 cmd)** | 95.8655% (inherited from v3.0) | `reports/model_v3.0/report_v3.0.txt` |
 | **Validation Accuracy** | 96.36% | `reports/model_v3.0/history_v3.0.json` |
 | **Parameters** | 1,217,349 | `src/models.py` |
 
 ### Version progression
 
-Every version is trained with the same residual CNN recipe and evaluated on the same official speaker-disjoint splits. v3.1 is a deployment release and trains no new weights.
+Every version is trained with the same residual CNN recipe and evaluated on the same official speaker-disjoint splits, so the columns below are directly comparable. v3.1 is a deployment release and trains no new weights.
 
-| Version | Key Change | Params | Test Acc (35 cmd) | Model Card |
-| :-- | :-- | :-: | :-: | :-- |
-| **v1.0** | Baseline: single-channel Log-Mel front-end | 1,216,259 | 94.4571% | [v1.0 card](reports/model_v1.0/README.md) |
-| **v2.0** | Three-channel front-end: Log-Mel + Δ + Δ² | 1,216,835 | 94.7842% | [v2.0 card](reports/model_v2.0/README.md) |
-| **v2.1** | Rejection classes: `_silence_` + `_unknown_` | 1,217,349 | 94.1481% | [v2.1 card](reports/model_v2.1/README.md) |
-| **v2.2** | Calibration release: temperature scaling + threshold | 1,217,349 | 94.1481% | [v2.2 card](reports/model_v2.2/README.md) |
-| **v3.0** | Memory-optimized pipeline + conditional GPU augmentation | 1,217,349 | **95.8655%** | [v3.0 card](reports/model_v3.0/README.md) |
-| **v3.1** | Deployment release: static INT8 (QDQ) quantization of v3.0 | 1,217,349 | 95.8655%* | [v3.1 card](reports/model_v3.1/README.md) |
+| Version | Key change | Params | Val Acc | Test Acc (35 cmd) | Test Macro F1 | Rejection recall | Overall | Δ Test | Model Card |
+| :-- | :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-- |
+| **v1.0** | Baseline: single-channel Log-Mel front-end | 1,216,259 | 94.66% | 94.4571% | 0.9406 | — | 94.4571% | — | [v1.0 card](reports/model_v1.0/README.md) |
+| **v2.0** | Three-channel front-end: Log-Mel + Δ + Δ² | 1,216,835 | 94.77% | 94.7842% | 0.9436 | — | 94.7842% | +0.3271 | [v2.0 card](reports/model_v2.0/README.md) |
+| **v2.1** | Rejection classes: `_silence_` + `_unknown_` | 1,217,349 | 94.96% † | **94.1481%** | **0.9363** | `_silence_` 97.82%<br>`_unknown_` 98.36% | 94.5064% | **−0.6361** | [v2.1 card](reports/model_v2.1/README.md) |
+| **v2.2** | Calibration release: temperature scaling + threshold | 1,217,349 | 94.94% | **94.1481%** | 0.9364 | `_silence_` 98.36%<br>`_unknown_` 99.09% | 94.5642% | **0.0000** ‡ | [v2.2 card](reports/model_v2.2/README.md) |
+| **v3.0** | Memory-optimized pipeline + conditional GPU augmentation | 1,217,349 | 96.36% | **95.8655%** | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | **+1.7174** | [v3.0 card](reports/model_v3.0/README.md) |
+| **v3.1** | Deployment release: static INT8 (QDQ) quantization | 1,217,349 | 96.36% | 95.8655%* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.1 card](reports/model_v3.1/README.md) |
 
-*\*v3.1 accuracy cells are copies of v3.0 by construction, as no new weights are trained. Read the v3.1 card for quantization fidelity metrics.*
+† The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
+
+‡ v2.2 takes **no gradient step at all**: `Δ Test` is zero by construction, not by measurement, because temperature scaling cannot change an argmax. All 11,005 command clips are classified exactly as in the v2.1 pass — the per-class recall of every one of the 35 commands is identical row-for-row in the two reports — so every accuracy cell on the command task is a copy of the v2.1 cell. Only the columns that mix in the redrawn rejection clips move — `Test Macro F1` (0.9363 → 0.9364, through precision), `Overall` (94.5064 % → 94.5642 %) and `Rejection recall` — and they move only because `src/dataset.py` slices the 1,100 synthetic `_silence_` / `_unknown_` clips out of the held-out recordings at load time instead of storing them on disk. Treat the v2.2 row as a _calibration and rejection_ result, not an accuracy result.
+
+§ v3.0's `Test Macro F1` is the unweighted mean of the 35 command-class F1 scores printed in `reports/model_v3.0/report_v3.0.txt`; the same report gives the 37-class macro average as `0.9560`. Unlike v2.2, v3.0 trains new weights, so its row is a genuine accuracy result.
+
+\*v3.1 accuracy cells are copies of v3.0 by construction, as no new weights are trained. Read the v3.1 card for quantization fidelity metrics.
 
 ### What the progression shows
 
-- **A single-channel front-end limits the model.** Moving to a 3-channel Log-Mel + Δ + Δ² representation in v2.0 yields a consistent, measurable gain.
+- **A single-channel front-end limits the model.** Moving to a 3-channel Log-Mel + Δ + Δ² representation in v2.0 establishes the multi-channel front-end used in all subsequent versions.
 - **Rejection capability trades slightly with command accuracy.** Introducing `_silence_` and `_unknown_` in v2.1 costs ~0.64 points on the 35-command task but enables robust real-world deployment.
 - **Pipeline efficiency drives the latest accuracy gains.** v3.0 moves the audio cache to `int16` and the feature extraction/augmentation to the GPU. This memory-optimized pipeline allows a longer 30-epoch training schedule, lifting the 35-command Top-1 accuracy to **95.8655%** (+1.72 points) without changing the network architecture.
 - **v3.1 is purely a deployment optimization.** It focuses on artifact size and web compatibility via INT8 static quantization, preserving the v3.0 predictive fidelity with 99.55% top-1 agreement.
@@ -133,7 +141,7 @@ flowchart LR
 .
 ├── checkpoints/                  # Model weight releases (git-ignored; created at runtime)
 │   ├── model_v3.0/               # CommandSense_v3.0.pth, CommandSense_v3.0.onnx
-│   └── model_v3.1/               # CommandSense_v3.1_int8.onnx
+│   └── model_v3.1/               # CommandSense_v3.1.pth, CommandSense_v3.1_int8.onnx
 ├── configs/                      # Global hyperparameters, paths and class mapping
 │   ├── calibration/              # Calibration payload (T and tau)
 │   ├── config.py                 
@@ -164,14 +172,16 @@ pip install -r requirements.txt
 
 ### 2. Download the model weights
 
-Checkpoints are not committed to keep the repository lightweight. Grab the assets from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases) and place them in the versioned folders:
+Checkpoints are not committed to keep the repository lightweight. Grab the **v3.1 release bundle** from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases) and place the files into the versioned folder:
 
 ```text
-checkpoints/model_v3.0/CommandSense_v3.0.pth
-checkpoints/model_v3.0/CommandSense_v3.0.onnx
-checkpoints/model_v3.1/CommandSense_v3.1_int8.onnx
-configs/calibration/CommandSense_calibration_v3.1.json
+checkpoints/model_v3.1/
+├── CommandSense_v3.1.pth         # (Identical to v3.0 weights, included for a self-contained release)
+├── CommandSense_v3.1_int8.onnx   # Edge/Web optimized INT8 graph
+└── CommandSense_calibration_v3.1.json
 ```
+
+*(Note: If you need to reproduce training from scratch, use `train.py` which will output to `checkpoints/model_v3.0/`. For deployment, the v3.1 bundle is recommended.)*
 
 ### 3. Run the web app
 
@@ -186,6 +196,7 @@ Open the printed local URL, record a command with the microphone, and press **Re
 ```bash
 python -m pytest tests/
 ```
+
 This runs lightweight pipeline and quantization smoke tests to ensure the PyTorch and ONNX backends are correctly resolving the checkpoints and calibration payloads.
 
 ---
@@ -235,7 +246,7 @@ python evaluate.py    # fits T/tau and generates reports
 
 ## Web App
 
-`app.py` starts a Gradio interface that supports live microphone input. 
+`app.py` starts a Gradio interface that supports live microphone input.
 
 - Browser recordings arrive as WebM/Opus; the pipeline decodes them transparently.
 - It uses the dual-backend inferencer (`src/inference.py`), preferring ONNX Runtime if available, falling back to PyTorch.
@@ -261,9 +272,9 @@ python quantize_int8.py  # generates the v3.1 INT8 artifact
 
 ## Rejection & Confidence Thresholding
 
-The model explicitly learns to reject via two non-command classes: `_silence_` (background noise) and `_unknown_` (LibriSpeech OOV speech). 
+The model explicitly learns to reject via two non-command classes: `_silence_` (background noise) and `_unknown_` (LibriSpeech OOV speech).
 
-Additionally, v2.2 introduced a **calibrated confidence threshold** (`tau`), which was re-fitted for v3.0 (`T = 1.3116`, `tau* = 0.89`). 
+Additionally, v2.2 introduced a **calibrated confidence threshold** (`tau`), which was re-fitted for v3.0 (`T = 1.3116`, `tau* = 0.89`).
 
 A clip is answered only when its calibrated top-1 probability reaches `tau`; otherwise, it is served as `_unknown_`. This buys precision (**99.48% retained accuracy** on answered clips) at the cost of coverage (**89.76%** of clips answered).
 
@@ -286,7 +297,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 
 **Known gaps and limitations:**
 - **CPU latency on INT8:** v3.1 reduces artifact size for web compatibility, but the INT8 CPU provider is currently ~1.68x slower than the float32 CPU provider.
-- **Single-run metrics:** The reported v3.0 accuracy is the result of a single training run. 
+- **Single-run metrics:** The reported v3.0 accuracy is the result of a single training run.
 - **1.0s rigid window:** Clips are force-fitted to 1.0s. Utterances longer than one second are truncated, and silence-trimmed clips are zero-padded when shorter.
 - **Scope:** Strict 35-command keyword spotting with OOV rejection, not continuous speech recognition.
 
