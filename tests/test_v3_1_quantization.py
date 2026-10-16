@@ -45,6 +45,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from configs.config import (  # noqa: E402
     MODEL_NAME,
+    MODEL_VERSION,
     NUM_CLASSES,
     REJECTION_CLASSES,
     SEED,
@@ -56,8 +57,8 @@ from src.dataset import SpeechCommandsDataset  # noqa: E402
 from src.transforms import AudioToThreeChannelMel  # noqa: E402
 from train import set_seed  # noqa: E402  (shared seeding helper, as in evaluate.py)
 
-VERSION = "v3.1"                       # INT8 release under test
-SOURCE_VERSION = "v3.0"                # float32 release it was derived from
+VERSION = MODEL_VERSION                # release under test: its INT8 graph + float32
+SOURCE_VERSION = MODEL_VERSION         # same self-contained release: its JSON has T/tau
 EVALUATION_SPLIT = "testing"           # never seen by training, calibration or T/tau
 # 1,000 clips is ~27 per class on the 37-label axis: enough for the per-class table
 # below to say something, while the split build still dominates the runtime.
@@ -87,11 +88,11 @@ PER_CLASS_AGREEMENT_MIN = 0.90
 # Decision-space tolerance: the mean softmax drift must stay far tighter than the
 # +/-1 label change that would matter downstream.
 SOFTMAX_DRIFT_MAX = 0.05
-# Coverage gap v3.1 may show against float32 while reusing v3.0's T/tau. A 1,000-clip
-# draw carries ~0.95 pt of sampling error on a coverage estimate (~1.3 pt for an
-# unpaired gap) and this draw is paired (both graphs score the same clips), so the
-# guard is generous; the shipped decision is made on the whole split inside
-# quantize_int8.py, with a 0.5 pt tolerance.
+# Coverage gap the INT8 graph may show against float32 while reusing the shipped
+# T/tau. A 1,000-clip draw carries ~0.95 pt of sampling error on a coverage estimate
+# (~1.3 pt for an unpaired gap) and this draw is paired (both graphs score the same
+# clips), so the guard is generous; the shipped decision is made on the whole split
+# inside quantize_int8.py, with a 0.5 pt tolerance.
 COVERAGE_TOLERANCE_MAX = 0.02
 BENCHMARK_ROUNDS = 3
 
@@ -112,7 +113,7 @@ def load_graph(path):
 
 
 def testing_sample(limit=EVALUATION_SAMPLES):
-    """Stream ``limit`` clips of the testing split through the v3.0 front-end.
+    """Stream ``limit`` clips of the testing split through the deployment front-end.
 
     ``set_seed`` also fixes the global generator the dataset draws its extra
     ``_silence_`` / ``_unknown_`` clips from, so both the sampling and the sampled
@@ -313,9 +314,9 @@ def test_calibration_metadata():
     ``export_onnx.embed_calibration_metadata``, which ``quantize_int8.py`` calls) and
     ``read_calibration_metadata`` the reader side, so this is the round trip on the
     shipped file: a runtime that only has the graph can recover the operating point
-    from ``commandsense.calibration.*`` without the JSON. The values of the v3.0
-    payload are printed next to them, because v3.1 is allowed to *differ* from v3.0 -
-    that is the re-fit branch of the quantizer, not a bug.
+    from ``commandsense.calibration.*`` without the JSON. The payload the runtime loads
+    from the version's JSON is printed next to the graph's own copy, so both sides of
+    the round trip can be read off one line.
     """
     state = prepared()
     payload = calibration.load_calibration(version=VERSION)
@@ -340,19 +341,19 @@ def test_calibration_metadata():
             f"{key}: the graph documents {graph[key]} but the payload serves "
             f"{served[key]}"
         )
-    v3_0 = calibration.load_calibration(version=SOURCE_VERSION) or {}
+    served_json = calibration.load_calibration(version=SOURCE_VERSION) or {}
     print(
         f"[OK] calibration metadata: {len(graph)} "
         f"'{calibration.ONNX_METADATA_PREFIX}*' entries, T="
         f"{float(graph['temperature']):.6f}, tau="
         f"{float(graph['confidence_threshold']):.2f}; "
-        f"{SOURCE_VERSION} serves T={v3_0.get('temperature')}, "
-        f"tau={v3_0.get('confidence_threshold')}"
+        f"the {SOURCE_VERSION} JSON serves T={served_json.get('temperature')}, "
+        f"tau={served_json.get('confidence_threshold')}"
     )
 
 
 def test_operating_point_transfer():
-    """v3.1 reuses v3.0's T/tau - which must still hold on this draw.
+    """The INT8 graph reuses the shipped T/tau - which must still hold on this draw.
 
     Coverage and retained accuracy of both graphs are measured at the payload's own
     (T, tau). The bound is the shipped 0.5 pt tolerance plus the sampling slack of a
@@ -381,8 +382,8 @@ def test_operating_point_transfer():
     assert coverage_gap <= COVERAGE_TOLERANCE_MAX, (
         f"coverage gap {coverage_gap * 100:.2f} pt > "
         f"{COVERAGE_TOLERANCE_MAX * 100:.1f} pt at T={temperature:.6f}, "
-        f"tau={threshold:.2f}: quantization moved the operating point v3.0's T/tau "
-        "were fitted for, so v3.1 would need its own re-fit"
+        f"tau={threshold:.2f}: quantization moved the operating point the shipped T/tau "
+        "was fitted for, so the INT8 graph would need its own re-fit"
     )
     assert accuracy_gap <= COVERAGE_TOLERANCE_MAX, (
         f"retained-accuracy gap {accuracy_gap * 100:.2f} pt > "
@@ -489,7 +490,7 @@ def main():
     test_calibration_metadata()
     test_operating_point_transfer()
     report_metrics()
-    print("\n[OK] v3.1 quantization smoke test passed")
+    print(f"\n[OK] {VERSION} quantization smoke test passed")
 
 
 if __name__ == "__main__":

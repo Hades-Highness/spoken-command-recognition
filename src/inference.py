@@ -1,14 +1,26 @@
 """Checkpoint loading and prediction, with an optional ONNX Runtime backend.
 
-The checkpoint is resolved from
-``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical) and then
-``checkpoints/<MODEL_NAME>_<version>.pth`` (legacy layout). The backend is one of
-``"onnx"`` (ONNX Runtime, needs the matching ``.onnx`` file), ``"pytorch"`` or
-``"auto"`` (ONNX when the file exists and loads, PyTorch otherwise).
+Every artifact is resolved from the configured ``MODEL_VERSION`` - a different
+release is never substituted for a missing one:
 
-Confidence calibration (v2.2): both backends return raw logits and the temperature
-``T`` is applied to them in Python (``softmax(logits / T)``), so the two backends
-score identically and the exported graph never has to be rebuilt when ``T`` or the
+* weights - ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical)
+  and then ``checkpoints/<MODEL_NAME>_<version>.pth`` (legacy flat layout),
+* ONNX    - the shipped INT8 graph ``<MODEL_NAME>_<version>_int8.onnx`` first, then
+  the float32 reference ``<MODEL_NAME>_<version>_fp32.onnx``, then the unsuffixed
+  ``<MODEL_NAME>_<version>.onnx`` that ``export_onnx.py`` writes. Each name is
+  probed in the version's checkpoint folder, the legacy flat one and ``onnx/``.
+
+When no artifact of ``MODEL_VERSION`` can be found, start-up raises a
+``FileNotFoundError`` naming the version and pointing at the GitHub Releases page,
+where the self-contained release bundle lives.
+
+The backend is one of ``"onnx"`` (ONNX Runtime, needs the matching ``.onnx`` file),
+``"pytorch"`` or ``"auto"`` (ONNX when the file exists and loads, PyTorch
+otherwise).
+
+Confidence calibration: both backends return raw logits and the temperature ``T`` is
+applied to them in Python (``softmax(logits / T)``), so the two backends score
+identically and the exported graph never has to be rebuilt when ``T`` or the
 threshold changes. Every prediction also carries a confidence-threshold decision:
 when the calibrated top-1 probability stays below ``tau``, the served label becomes
 the reject label (``REJECT_LABEL``) and ``is_low_confidence`` is set.
@@ -19,8 +31,8 @@ version's checkpoint folder.
 Safety fallback: when no calibration file can be read - absent, unreadable or
 holding values the runtime cannot apply - the inferencer falls back on
 ``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead of
-raising. Raw logits are then served and nothing is rejected for low confidence,
-which is exactly the v2.1 decision rule, so a missing calibration file degrades the
+raising. Raw logits are then served and nothing is rejected for low confidence -
+the threshold-free decision rule - so a missing calibration file degrades the
 release instead of breaking the application.
 """
 
@@ -51,6 +63,10 @@ from src.utils import load_and_preprocess_audio  # noqa: E402
 EXPECTED_CHANNELS = 3
 EXPECTED_TIME_FRAMES = 63
 
+# Where the self-contained release bundle (weights, ONNX graphs, calibration) is
+# published; quoted by the errors raised when an artifact of MODEL_VERSION is absent.
+RELEASES_URL = "https://github.com/Hades-Highness/spoken-command-recognition/releases"
+
 
 def _positive_float(value):
     """Return ``value`` as a finite ``float`` > 0, or ``None`` when it is unusable."""
@@ -70,8 +86,13 @@ def _probability_float(value):
     return number if np.isfinite(number) and 0.0 <= number <= 1.0 else None
 
 
-class ModelUnavailableError(RuntimeError):
-    """Raised when neither backend can be initialised."""
+class ModelUnavailableError(FileNotFoundError):
+    """Raised when no artifact of the configured ``MODEL_VERSION`` can be found.
+
+    Subclasses :class:`FileNotFoundError` so callers can catch either the specific
+    error or the builtin, and so a missing release bundle fails as loudly as any
+    other missing file in the pipeline.
+    """
 
 
 class CommandInferencer:
@@ -118,12 +139,16 @@ class CommandInferencer:
             self.available_backends.insert(0, "onnx")
 
         if self.pth_path is None and not (self.onnx_path and self._onnx_runtime_installed()):
+            expected_dir = checkpoint_dir(self.version)
             raise ModelUnavailableError(
-                "No usable model found. Expected either "
-                f"'{checkpoint_dir(self.version)}/{MODEL_NAME}_{self.version}.pth' or "
-                f"'{checkpoint_dir(self.version)}/{MODEL_NAME}_{self.version}.onnx'. "
-                f"Download the CommandSense {self.version} model assets into that "
-                "version's checkpoint folder, or train/export that version first."
+                f"Cannot find the {MODEL_NAME} {self.version} model files for the "
+                f"configured MODEL_VERSION. Looked for "
+                f"'{expected_dir}/{MODEL_NAME}_{self.version}.pth' and "
+                f"'{expected_dir}/{MODEL_NAME}_{self.version}_int8.onnx' "
+                f"(or the '{MODEL_NAME}_{self.version}_fp32.onnx' float32 reference). "
+                f"Download the release bundle from the GitHub Releases page "
+                f"({RELEASES_URL}) and place the {self.version} artifacts in "
+                f"'{expected_dir}'."
             )
 
         self.load_calibration(
@@ -137,16 +162,16 @@ class CommandInferencer:
         """Load ``T``/``tau`` from the version's calibration JSON.
 
         The canonical file is
-        ``configs/calibration/CommandSense_calibration_v2.2.json`` (see
-        :func:`configs.config.calibration_path`), which is resolved here
-        automatically; the configured version's checkpoint folder is also
-        probed as a legacy location.
+        ``configs/calibration/<MODEL_NAME>_calibration_<version>.json`` for the
+        configured version (see :func:`configs.config.calibration_path`), which is
+        resolved here automatically; the configured version's checkpoint folder is
+        also probed as a legacy location.
 
         Nothing in this method can raise. An absent, unreadable, unparsable or
         semantically unusable file leaves the defaults from ``configs/config.py``
         in place - ``T = 1.0`` (raw logits) and ``tau = 0.0`` (nothing is rejected
-        for low confidence) - so the application keeps serving the v2.1 decision
-        rule instead of crashing.
+        for low confidence) - so the application keeps serving the threshold-free
+        decision rule instead of crashing.
         """
         path = calibration.resolve_calibration_file(self.version)
         if path is not None:
@@ -220,6 +245,13 @@ class CommandInferencer:
             self.confidence_threshold = float(self.calibration["confidence_threshold"])
 
     def _resolve_checkpoint(self, checkpoint_path):
+        """Path of the ``.pth`` weights of ``self.version``, or ``None``.
+
+        An explicit ``checkpoint_path`` always wins (callers and tests that point at
+        one file); otherwise the version's canonical layout is probed, then the
+        legacy flat one. Only ``self.version`` is ever considered - no other release
+        is substituted for a missing one.
+        """
         candidates = [
             checkpoint_path,
             checkpoint_dir(self.version) / f"{MODEL_NAME}_{self.version}.pth",
@@ -231,14 +263,26 @@ class CommandInferencer:
         return None
 
     def _resolve_onnx(self):
-        candidates = [
-            checkpoint_dir(self.version) / f"{MODEL_NAME}_{self.version}.onnx",
-            CHECKPOINT_DIR / f"{MODEL_NAME}_{self.version}.onnx",
-            ONNX_DIR / f"{MODEL_NAME}_{self.version}.onnx",
+        """Path of the ONNX graph of ``self.version``, or ``None``.
+
+        The shipped deployment artifact is the INT8 graph, so
+        ``<MODEL_NAME>_<version>_int8.onnx`` is preferred, then the float32 reference
+        ``<MODEL_NAME>_<version>_fp32.onnx`` written by ``quantize_int8.py``, then the
+        unsuffixed ``<MODEL_NAME>_<version>.onnx`` that ``export_onnx.py`` writes.
+        Each name is probed in the version's checkpoint folder first, then the legacy
+        flat checkpoint folder and ``onnx/``. As in :meth:`_resolve_checkpoint`, no
+        other release is ever substituted.
+        """
+        names = [
+            f"{MODEL_NAME}_{self.version}_int8.onnx",
+            f"{MODEL_NAME}_{self.version}_fp32.onnx",
+            f"{MODEL_NAME}_{self.version}.onnx",
         ]
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                return str(candidate)
+        for directory in (checkpoint_dir(self.version), CHECKPOINT_DIR, ONNX_DIR):
+            for name in names:
+                candidate = directory / name
+                if os.path.exists(candidate):
+                    return str(candidate)
         return None
 
     def _load_labels(self, labels_path):
@@ -274,9 +318,10 @@ class CommandInferencer:
             return
         if self.pth_path is None:
             raise FileNotFoundError(
-                f"PyTorch checkpoint for CommandSense {self.version} was not found. "
+                f"PyTorch checkpoint for {MODEL_NAME} {self.version} was not found. "
                 f"Download '{MODEL_NAME}_{self.version}.pth' into "
-                f"'{checkpoint_dir(self.version)}' or train that version first."
+                f"'{checkpoint_dir(self.version)}' from the release bundle at "
+                f"{RELEASES_URL}, or train that version first."
             )
 
         model = CommandSense(num_classes=len(self.labels), in_channels=EXPECTED_CHANNELS)
@@ -292,9 +337,11 @@ class CommandInferencer:
             return
         if self.onnx_path is None:
             raise FileNotFoundError(
-                f"ONNX model for CommandSense {self.version} was not found. "
-                f"Download '{MODEL_NAME}_{self.version}.onnx' into "
-                f"'{checkpoint_dir(self.version)}' or export that version with "
+                f"ONNX model for {MODEL_NAME} {self.version} was not found. "
+                f"Download '{MODEL_NAME}_{self.version}_int8.onnx' (or the "
+                f"'{MODEL_NAME}_{self.version}_fp32.onnx' reference) into "
+                f"'{checkpoint_dir(self.version)}' from the release bundle at "
+                f"{RELEASES_URL}, or export that version with "
                 "'python export_onnx.py'."
             )
 

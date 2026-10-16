@@ -1,34 +1,36 @@
-"""Static INT8 quantization of the v3.0 CommandSense graph (v3.1).
+"""Static INT8 quantization of the CommandSense deployment graph.
 
-v3.0 ships a float32 ONNX graph; v3.1 keeps its weights frozen and produces the
-INT8 sibling that the browser / edge runtime (v4.0, ONNX Runtime Web) will serve:
+The deployment version in ``configs/config.py`` (``MODEL_VERSION``) ships one frozen
+float32 checkpoint and the two graphs built from it: a float32 reference and the
+INT8 sibling that the browser / edge runtime (v4.0, ONNX Runtime Web) will serve.
+Nothing below is pinned to a literal version string:
 
-1. re-export the v3.0 checkpoint to ONNX (opset 17, dynamic batch axis): this
+1. re-export the checkpoint to ONNX (opset 17, dynamic batch axis): this
    float32 graph is the reference the quantizer needs and the baseline every
    fidelity, decision and latency number below is measured against,
 2. calibrate the activation ranges on ``CALIBRATION_SAMPLES`` clips of the
-   *validation* split, streamed one clip at a time through the v3.0 front-end so
-   the same ``src.transforms.AudioToThreeChannelMel`` math trains and deploys,
+   *validation* split, streamed one clip at a time through the deployment front-end
+   so the same ``src.transforms.AudioToThreeChannelMel`` math trains and deploys,
 3. quantize statically with ONNX Runtime post-training quantization in the ``QDQ``
    format (per-channel int8 weights, int8 activations, MinMax ranges) - the format
    ONNX Runtime Web executes natively, which keeps the v4.0 WASM/WebNN path open,
 4. score *both* graphs over the whole ``testing`` split - which trained neither the
    weights, nor the activation ranges, nor ``T``/``tau`` - and report the fidelity
    (top-1 agreement, per-class flips, softmax drift) and the operating point
-   (coverage / retained accuracy / FRR / FAR at v3.0's T and tau),
-5. reuse v3.0's T/tau while quantizing moves the coverage by less than
+   (coverage / retained accuracy / FRR / FAR at the shipped T and tau),
+5. reuse the shipped T/tau while quantizing moves the coverage by less than
    ``COVERAGE_TOLERANCE``, and re-fit T and tau on the INT8 logits of the
    validation split above it,
 6. embed that payload into the graph's ``metadata_props`` and read it back - which
    exercises the reader a single-file runtime would use, not only the writer - then
-   write the artifact to ``checkpoints/model_v3.1/`` and a human-readable report to
-   ``reports/model_v3.1/quantization_report.txt``.
+   write the artifacts to the version's ``checkpoints/`` folder and a human-readable
+   report to its ``reports/`` folder.
 
 Split provenance: the activation ranges and ``T``/``tau`` both come from
 'validation' ('testing' would leak the measurement split into the shipped
 artifact) and the measurement uses 'testing' only, never feeding back into the
-artifact. Because the validation split is then used twice, v3.0's operating point
-is re-measured on 'testing' before being reused.
+artifact. Because the validation split is then used twice, the shipped operating
+point is re-measured on 'testing' before being reused.
 
 The run is reproducible: ``set_seed`` fixes the split draw, including the extra
 ``_silence_`` / ``_unknown_`` clips, before calibration. The checkpoint is read-only
@@ -64,6 +66,7 @@ from configs.config import (  # noqa: E402
     CHECKPOINT_DIR,
     DEFAULT_TEMPERATURE,
     MODEL_NAME,
+    MODEL_VERSION,
     NUM_CLASSES,
     REJECTION_CLASSES,
     SEED,
@@ -72,7 +75,7 @@ from configs.config import (  # noqa: E402
     checkpoint_dir,
     ensure_version_dirs,
 )
-from export_onnx import embed_calibration_metadata  # noqa: E402  (same writer as v3.0)
+from export_onnx import embed_calibration_metadata  # noqa: E402  (same writer as the export)
 from src import calibration  # noqa: E402  (T/tau maths shared with evaluate.py)
 from src.dataset import SpeechCommandsDataset  # noqa: E402
 from src.models import CommandSense  # noqa: E402
@@ -90,8 +93,12 @@ for _stream in (sys.stdout, sys.stderr):
         except (ValueError, OSError):  # pragma: no cover - exotic stream types
             pass
 
-SOURCE_VERSION = "v3.0"        # frozen float32 release that gets quantized
-TARGET_VERSION = "v3.1"        # INT8-only release
+# The deployment version in configs/config.py ships the frozen float32 checkpoint, its
+# float32 reference graph and its INT8 sibling, so both sides of the quantization are
+# resolved from MODEL_VERSION instead of being pinned to a literal - the release bundle
+# is self-contained and no earlier release is ever read.
+SOURCE_VERSION = MODEL_VERSION   # release whose frozen checkpoint is quantized
+TARGET_VERSION = MODEL_VERSION   # INT8 sibling, served under the same version
 OPSET_VERSION = 17             # same opset as export_onnx.py
 INPUT_NAME = "input"
 OUTPUT_NAME = "output"
@@ -106,7 +113,7 @@ CALIBRATION_SAMPLES = 500
 # activation ranges, nor T/tau, and it is scored in full.
 EVALUATION_SPLIT = "testing"
 EVALUATION_SAMPLES = 0             # 0 -> every clip of EVALUATION_SPLIT
-# Reusing v3.0's T/tau for the quantized graph is defensible while quantization
+# Reusing the shipped T/tau for the quantized graph is defensible while quantization
 # moves the coverage of a graph by no more than this (0.5 point of the split);
 # above it, T and tau are re-fitted on the INT8 logits - see fit_operating_point.
 COVERAGE_TOLERANCE = 0.005
@@ -138,7 +145,7 @@ def resolve_checkpoint(version=SOURCE_VERSION):
 
 
 def load_fp32_model(checkpoint_path):
-    """Rebuild ``CommandSense`` and load the frozen v3.0 weights."""
+    """Rebuild ``CommandSense`` and load the frozen float32 weights."""
     model = CommandSense(num_classes=NUM_CLASSES, in_channels=3)
     model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
     model.eval()
@@ -181,7 +188,7 @@ def count_parameters(onnx_path):
 
 
 class ClipCalibrationReader(CalibrationDataReader):
-    """Streams calibration clips through the v3.0 front-end, one clip at a time.
+    """Streams calibration clips through the deployment front-end, one clip at a time.
 
     ``get_next`` runs the real ``AudioToThreeChannelMel`` on the int16 waveform of
     a randomly drawn clip, so the ranges ONNX Runtime records are the ones the
@@ -328,7 +335,7 @@ def quality_block(logits, targets, temperature):
 
 
 def format_quality_block(title, summary, temperature):
-    """Render one quality block in the shape ``report_v3.0.txt`` uses."""
+    """Render one quality block in the shape the evaluation report uses."""
     label = f"after (T={format(temperature, '.4f')})"
     return "\n".join(
         [
@@ -357,7 +364,7 @@ def fit_operating_point(logits, targets):
     Used only when quantization moved the operating point beyond
     ``COVERAGE_TOLERANCE``: T minimises the NLL of *this* graph, tau is swept and
     selected with the project's criterion and minimum coverage, so the re-fitted
-    pair stays comparable to the v3.0 one it replaces.
+    pair stays comparable to the shipped one it replaces.
     """
     temperature = calibration.fit_temperature(logits, targets)
     sweep = calibration.sweep_thresholds(
@@ -486,7 +493,7 @@ def verify_int8_graph(int8_path):
 
 
 def build_report(context):
-    """Render the plain-text quantization report (mirrors report_v3.0.txt).
+    """Render the plain-text quantization report (mirrors the evaluate.py report).
 
     Every number comes from ``context``, i.e. from this run: the fidelity and
     decision blocks are measured on ``EVALUATION_SPLIT`` and the calibration block
@@ -537,7 +544,7 @@ def build_report(context):
         "                    ('testing' would leak the measurement split into the",
         "                    shipped artifact, so it is never calibrated on)",
         "T / tau source    : 'validation' too (evaluate.py fits them there), i.e. the",
-        "                    one split used twice. That is why the v3.0 operating",
+        "                    one split used twice. That is why the shipped operating",
         "                    point is re-measured below instead of copied on faith.",
         f"Measurement split : '{EVALUATION_SPLIT}', {context['fidelity_samples']} clips "
         "(the whole split)",
@@ -551,7 +558,7 @@ def build_report(context):
         f"Compression       : {compression:.1f}% smaller ({ratio:.2f}x smaller file)",
         "",
         f"--- OPERATING POINT AT T={context['temperature']:.6f}, "
-        f"tau={context['threshold']:.2f} ('{EVALUATION_SPLIT}', v3.0's pair) ---",
+        f"tau={context['threshold']:.2f} ('{EVALUATION_SPLIT}', shipped pair) ---",
         f"{'':22s}{'float32':>11s}{'int8':>11s}{'delta':>12s}",
         f"{'coverage':22s}{fp32_dec['coverage'] * 100:>10.2f}%"
         f"{int8_dec['coverage'] * 100:>10.2f}%"
@@ -623,14 +630,14 @@ def build_report(context):
         f"int8 graph        : {int8_ms['median_ms']:.3f} ms/clip "
         f"(min {int8_ms['min_ms']:.3f}, max {int8_ms['max_ms']:.3f})",
         f"int8 / float32    : {latency_ratio:.2f}x -> CPU latency is NOT improved by this",
-        "                    quantization; the win of v3.1 is size, see notes.",
+        "                    quantization; the win is size, see notes.",
         "",
         "--- CALIBRATION ARTIFACT ---",
         f"Served payload    : {context['calibration_json']}",
         f"T / tau           : {context['temperature']:.6f} / {context['threshold']:.2f} "
         f"({context['payload_origin']})",
         f"Resolved by       : calibration.resolve_calibration_file('{TARGET_VERSION}'), a",
-        "                    per-version lookup, so v3.0 keeps serving its own file.",
+        "                    per-version lookup, so each release serves its own file.",
         f"Graph metadata    : {context['metadata_entries']} "
         f"'{calibration.ONNX_METADATA_PREFIX}*' entries, read back as "
         f"T={context['metadata_readback'].get('temperature')}, "
@@ -648,7 +655,7 @@ def build_report(context):
         f"{fp32_ms['median_ms']:.3f} ms/clip for float32",
         f"  ({latency_ratio:.2f}x) on this host. ONNX Runtime's CPU QDQ path pays a",
         "  quantize/dequantize pair per activation and has no vectorized int8 kernel for",
-        "  these small 3x64x63 activations, so v3.1 makes no speed claim anywhere. The",
+        "  these small 3x64x63 activations, so this release makes no speed claim anywhere. The",
         "  v4.0 target is ONNX Runtime Web, whose WASM SIMD/WebNN kernels consume the QDQ",
         "  graph natively; tests/test_v3_1_quantization.py re-measures the ratio wherever",
         "  it runs instead of asserting one.",
@@ -723,7 +730,10 @@ def main():
     if checkpoint_path is None:
         expected = checkpoint_dir(SOURCE_VERSION) / f"{MODEL_NAME}_{SOURCE_VERSION}.pth"
         print(f"[!] Error: no {SOURCE_VERSION} checkpoint found at '{expected}'.")
-        print("[!] Train and export v3.0 (python train.py) before quantizing it.")
+        print(
+            f"[!] Train and export {SOURCE_VERSION} (python train.py) before "
+            "quantizing it."
+        )
         return
 
     checkpoints, reports = ensure_version_dirs(TARGET_VERSION)
@@ -732,8 +742,8 @@ def main():
     report_path = reports / REPORT_NAME
 
     print(
-        f"[*] Quantizing {MODEL_NAME} {SOURCE_VERSION} -> {TARGET_VERSION} "
-        "(static int8/QDQ)"
+        f"[*] Quantizing {MODEL_NAME} {SOURCE_VERSION}: float32 reference -> "
+        f"{TARGET_VERSION} INT8 (static int8/QDQ)"
     )
     print(f"[*] Source weights <- {checkpoint_path}")
     export_fp32_graph(load_fp32_model(checkpoint_path), fp32_path)
@@ -759,7 +769,7 @@ def main():
         "int8": ort.InferenceSession(int8_path, options, providers=CPU_PROVIDERS),
     }
 
-    # --------------------------------------------- v3.0's shipped T and tau
+    # ------------------------------------ the release's shipped T and tau
     served = served_operating_point(SOURCE_VERSION)
     if served is None:
         print(
@@ -835,7 +845,7 @@ def main():
         payload_origin = f"reused from {SOURCE_VERSION}"
         verdict = [
             f"|d coverage| = {coverage_gap * 100:.2f} pt <= "
-            f"{COVERAGE_TOLERANCE * 100:.1f} pt, so v3.0's T/tau transfer to the",
+            f"{COVERAGE_TOLERANCE * 100:.1f} pt, so the shipped T/tau transfers to the",
             f"quantized graph and {TARGET_VERSION} ships the same operating point; "
             "re-fitting on the int8",
             f"logits would give T={refit_temperature:.6f}, tau={refit_threshold:.2f} - "
@@ -894,8 +904,8 @@ def main():
         calibration_samples=int(len(calibration_targets)),
         source_checkpoint=checkpoint_path,
         notes=(
-            f"INT8 sibling of {SOURCE_VERSION}, so ECE/NLL above are the quantized "
-            f"graph's on '{CALIBRATION_SPLIT}'. T/tau {payload_origin}; quantization "
+            f"INT8 build of the {SOURCE_VERSION} float32 graph, so ECE/NLL above are "
+            f"the quantized graph's on '{CALIBRATION_SPLIT}'. T/tau {payload_origin}; "
             f"moved the coverage of the held-out '{EVALUATION_SPLIT}' split by "
             f"{coverage_gap * 100:.2f} pt ({COVERAGE_TOLERANCE * 100:.1f} pt "
             f"tolerance). Activation ranges from {CALIBRATION_SAMPLES} "

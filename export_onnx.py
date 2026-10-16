@@ -58,7 +58,9 @@ def export_to_onnx():
     if checkpoint_path is None:
         print(
             f"[!] Error: no checkpoint found at "
-            f"'{checkpoint_dir(MODEL_VERSION)}/{MODEL_NAME}_{MODEL_VERSION}.pth'."
+            f"'{checkpoint_dir(MODEL_VERSION)}/{MODEL_NAME}_{MODEL_VERSION}.pth'. "
+            f"Download the {MODEL_VERSION} release bundle from the GitHub Releases "
+            f"page or train that version first."
         )
         return
 
@@ -156,7 +158,8 @@ def verify_onnx_model(onnx_path: str):
     
     print(f"[+] ONNX Strict Shape Verification Passed: declared_shape[1] == {num_channels}")
 
-    # v2.2 keeps the softmax in Python, so the graph must still end in raw logits.
+    # The softmax is applied in Python at serving time, so the graph must still end
+    # in raw logits.
     assert len(onnx_model.graph.output) == 1, "[!] Export Error: expected a single output"
     output_shape = [
         dim.dim_value for dim in onnx_model.graph.output[0].type.tensor_type.shape.dim
