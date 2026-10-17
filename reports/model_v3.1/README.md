@@ -2,11 +2,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v3.1.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/INT8%20Graph-1.202%20MB-green?style=for-the-badge" alt="INT8 Graph Size">
-  <img src="https://img.shields.io/badge/Compression-74.1%25%20smaller-green?style=for-the-badge" alt="Compression">
-  <img src="https://img.shields.io/badge/Agreement%20(INT8)-99.55%25-orange?style=for-the-badge" alt="Top-1 Agreement">
-  <img src="https://img.shields.io/badge/Temperature-1.3116-orange?style=for-the-badge" alt="Fitted Temperature">
-  <img src="https://img.shields.io/badge/Threshold%20(tau)-0.89-blue?style=for-the-badge" alt="Confidence Threshold">
+  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/INT8%20ONNX-SUPPORTED-green?style=for-the-badge" alt="INT8 ONNX">
+  <img src="https://img.shields.io/badge/FP32%20ONNX-SUPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
 

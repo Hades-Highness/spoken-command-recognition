@@ -2,12 +2,10 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v2.2.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/Temperature-1.8074-orange?style=for-the-badge" alt="Fitted Temperature">
-  <img src="https://img.shields.io/badge/Threshold%20(tau)-0.80-blue?style=for-the-badge" alt="Confidence Threshold">
-  <img src="https://img.shields.io/badge/Test%20ECE-0.0077-green?style=for-the-badge" alt="Expected Calibration Error">
+  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/ONNX-Supported-005ced?style=for-the-badge" alt="ONNX Runtime">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
-
 ---
 
 ## ★ Model Overview

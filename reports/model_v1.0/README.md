@@ -2,9 +2,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v1.0.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/Val%20Accuracy-94.66%25-green?style=for-the-badge" alt="Validation Accuracy">
-  <img src="https://img.shields.io/badge/Test%20Accuracy-94.46%25-green?style=for-the-badge" alt="Test Accuracy">
-  <img src="https://img.shields.io/badge/Classes-35%20Keywords-blue?style=for-the-badge" alt="35 Classes">
+  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/ONNX-Supported-005ced?style=for-the-badge" alt="ONNX Runtime">
+  <img src="https://img.shields.io/badge/Classes-35-blue?style=for-the-badge" alt="35 Classes">
 </p>
 
 ---
