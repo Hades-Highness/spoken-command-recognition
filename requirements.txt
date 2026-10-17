@@ -11,3 +11,4 @@ onnx
 onnxruntime
 onnxscript
 gradio
+sounddevice>=0.5

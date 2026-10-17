@@ -1,6 +1,10 @@
 import torch
 from pathlib import Path
 
+MODEL_NAME = "CommandSense"
+MODEL_VERSION = "v3.2"
+NUM_CLASSES = 37
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CHECKPOINT_DIR = BASE_DIR / "checkpoints"
@@ -42,10 +46,6 @@ FREQ_MASK_PARAM = 8
 TIME_MASK_PARAM = 10
 N_FREQ_MASKS = 2
 N_TIME_MASKS = 2
-
-MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v3.1"
-NUM_CLASSES = 37
 
 CALIBRATION_BINS = 15
 TEMPERATURE_MAX_ITER = 50

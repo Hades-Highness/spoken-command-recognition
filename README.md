@@ -153,6 +153,7 @@ flowchart LR
 ├── app.py                        # Interactive Gradio Web UI
 ├── evaluate.py                   # Metrics, calibration fit and tau sweep
 ├── export_onnx.py                # PyTorch to ONNX exporter
+├── listen.py                     # Real-time microphone keyword spotting (CLI)
 ├── quantize_int8.py              # v3.1 static INT8 quantization pipeline
 ├── requirements.txt              
 └── train.py                      # Training pipeline with AMP
@@ -191,7 +192,16 @@ python app.py
 
 Open the printed local URL, record a command with the microphone, and press **Recognize**. The UI features a live confidence threshold (`tau`) slider to see the reject mechanism in real-time.
 
-### 4. Check the architecture loads
+### 4. Run real-time keyword spotting
+
+```bash
+python listen.py --list-devices     # list the available microphones
+python listen.py --device 1         # capture, classify every 0.5 s, Ctrl+C to stop
+```
+
+The CLI captures 16 kHz mono audio, rebuilds the training features with the shared `AudioToThreeChannelMel` front-end and runs the ONNX graph of the `MODEL_VERSION` selected in `configs/config.py`. It prints a detection only when the calibrated top-1 probability reaches `tau` for a non-reject class, then applies a short cooldown so overlapping windows cannot repeat the same word.
+
+### 5. Check the architecture loads
 
 ```bash
 python -m pytest tests/
