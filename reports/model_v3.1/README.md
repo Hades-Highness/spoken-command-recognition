@@ -10,7 +10,7 @@
 
 ---
 
-## - Model Overview
+## ★ Model Overview
 
 * **Model Name**: CommandSense v3.1
 * **What it is**: a **deployment release, not a new model**. v3.1 takes the frozen v3.0 weights, re-exports them to ONNX and produces the **INT8 sibling of that graph**. It trains nothing, adds no layer, no parameter and no hyperparameter, and no gradient step is taken anywhere in the release.
@@ -27,7 +27,7 @@
 
 ---
 
-## - Quantization Recipe
+## ★ Quantization Recipe
 
 v3.1 is **post-training static quantization** with ONNX Runtime, in the QDQ format:
 
@@ -51,7 +51,7 @@ v3.1 is **post-training static quantization** with ONNX Runtime, in the QDQ form
 
 ---
 
-## - Fidelity (INT8 against float32, whole `testing` split)
+## ★ Fidelity (INT8 against float32, whole `testing` split)
 
 Both graphs score all 12,105 clips of `testing` (11,005 commands + 1,100 rejection clips) through the same features.
 
@@ -77,7 +77,7 @@ Both graphs score all 12,105 clips of `testing` (11,005 commands + 1,100 rejecti
 
 ---
 
-## - Operating Point
+## ★ Operating Point
 
 v3.0 ships `T = 1.311633` and `tau = 0.89`. Quantization is expected to move the decision boundary slightly, so the pair is re-measured on the whole `testing` split before it is reused:
 
@@ -92,7 +92,7 @@ v3.0 ships `T = 1.311633` and `tau = 0.89`. Quantization is expected to move the
 
 The coverage gap is **0.21 pt against a 0.5 pt tolerance**, so the v3.0 pair transfers and **v3.1 ships the same `T` and `tau`**. Re-fitting the temperature on the INT8 logits would give `T = 1.320859` with the same `tau = 0.89`, i.e. the same decision within noise; the re-fit branch exists in `quantize_int8.py` and was not taken. The remaining cells move by well under a point and in both directions, and none of them is an accuracy gain.
 
-### - Calibration quality
+### ★ Calibration quality
 
 NLL, ECE and MCE before (`T = 1`) and after temperature scaling, 15 bins:
 
@@ -105,7 +105,7 @@ NLL, ECE and MCE before (`T = 1`) and after temperature scaling, 15 bins:
 
 Temperature scaling improves every column on both graphs. On the held-out split the INT8 graph ends up marginally better calibrated than float32 (ECE 0.004124 against 0.005558), which is quantization smoothing the over-confident tail rather than an argument that INT8 is preferable.
 
-### - Calibration artifact
+### ★ Calibration artifact
 
 * `configs/calibration/CommandSense_calibration_v3.1.json` is the payload `src/inference.py` resolves for `v3.1` through `calibration.resolve_calibration_file("v3.1")`, a per-version lookup, so v3.0 keeps serving its own file.
 * The payload records `threshold_criterion = "min_cost"`, `n_bins = 15`, `model_version = "v3.1"` and its own provenance; `calibration_samples = 10,979` refers to the split the `T`/`tau` pass walked, while the activation ranges came from the 500-clip subset named at the top.
@@ -113,7 +113,7 @@ Temperature scaling improves every column on both graphs. On the held-out split 
 
 ---
 
-## - Size and Latency
+## ★ Size and Latency
 
 | Artifact | Size | Compression |
 | :--- | ---: | :--- |
@@ -133,7 +133,7 @@ ONNX Runtime's CPU QDQ path pays a quantize/dequantize pair per activation and h
 
 ---
 
-## - Deployment
+## ★ Deployment
 
 ### - Loading the Artifacts
 
@@ -163,7 +163,7 @@ python tests/test_v3_1_quantization.py  # re-measures the artifact and prints th
 
 ---
 
-## - Caveats
+## ★ Caveats
 
 * **The win is size, and only size.** No latency improvement is claimed: on the CPU provider the INT8 graph is 1.68x slower (2.718 ms/clip against 1.614 ms/clip), and the report states that on its own line.
 * **No accuracy claim.** No weight was trained or fine-tuned for v3.1. Where a version table shows v3.1 with v3.0's accuracy cells, those cells are copies by construction; the only v3.1-specific numbers are the fidelity and operating-point measurements on this card.
