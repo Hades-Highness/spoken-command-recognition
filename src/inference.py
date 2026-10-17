@@ -1,39 +1,18 @@
-"""Checkpoint loading and prediction, with an optional ONNX Runtime backend.
+"""Checkpoint loading and prediction with an optional ONNX Runtime backend.
 
-Every artifact is resolved from the configured ``MODEL_VERSION`` - a different
-release is never substituted for a missing one:
+Artifacts are resolved only from the configured ``MODEL_VERSION``: weights from
+``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical) or the
+legacy flat layout, and ONNX from the shipped INT8 graph first, then the float32
+reference, then the unsuffixed export. A release without any usable artifact
+raises :class:`ModelUnavailableError` with the expected paths and the releases
+URL instead of substituting a different version.
 
-* weights - ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical)
-  and then ``checkpoints/<MODEL_NAME>_<version>.pth`` (legacy flat layout),
-* ONNX    - the shipped INT8 graph ``<MODEL_NAME>_<version>_int8.onnx`` first, then
-  the float32 reference ``<MODEL_NAME>_<version>_fp32.onnx``, then the unsuffixed
-  ``<MODEL_NAME>_<version>.onnx`` that ``export_onnx.py`` writes. Each name is
-  probed in the version's checkpoint folder, the legacy flat one and ``onnx/``.
-
-When no artifact of ``MODEL_VERSION`` can be found, start-up raises a
-``FileNotFoundError`` naming the version and pointing at the GitHub Releases page,
-where the self-contained release bundle lives.
-
-The backend is one of ``"onnx"`` (ONNX Runtime, needs the matching ``.onnx`` file),
-``"pytorch"`` or ``"auto"`` (ONNX when the file exists and loads, PyTorch
-otherwise).
-
-Confidence calibration: both backends return raw logits and the temperature ``T`` is
-applied to them in Python (``softmax(logits / T)``), so the two backends score
-identically and the exported graph never has to be rebuilt when ``T`` or the
-threshold changes. Every prediction also carries a confidence-threshold decision:
-when the calibrated top-1 probability stays below ``tau``, the served label becomes
-the reject label (``REJECT_LABEL``) and ``is_low_confidence`` is set.
-
-The payload is discovered at start-up, ``configs/calibration/`` first, then the
-version's checkpoint folder.
-
-Safety fallback: when no calibration file can be read - absent, unreadable or
-holding values the runtime cannot apply - the inferencer falls back on
-``DEFAULT_TEMPERATURE`` (1.0) and ``DEFAULT_CONFIDENCE_THRESHOLD`` (0.0) instead of
-raising. Raw logits are then served and nothing is rejected for low confidence -
-the threshold-free decision rule - so a missing calibration file degrades the
-release instead of breaking the application.
+Both backends return raw logits, and ``softmax(logits / T)`` is applied in
+Python, so they score identically and changing ``T`` or ``tau`` never requires
+a re-export. Predictions below ``tau`` are served as ``REJECT_LABEL`` with
+``is_low_confidence`` set. When no usable calibration file is found, the
+inferencer falls back to ``T = 1.0`` and ``tau = 0.0`` (no low-confidence
+rejection) rather than failing.
 """
 
 import json
@@ -161,17 +140,12 @@ class CommandInferencer:
     def load_calibration(self, temperature=None, confidence_threshold=None) -> dict:
         """Load ``T``/``tau`` from the version's calibration JSON.
 
-        The canonical file is
-        ``configs/calibration/<MODEL_NAME>_calibration_<version>.json`` for the
-        configured version (see :func:`configs.config.calibration_path`), which is
-        resolved here automatically; the configured version's checkpoint folder is
-        also probed as a legacy location.
-
-        Nothing in this method can raise. An absent, unreadable, unparsable or
-        semantically unusable file leaves the defaults from ``configs/config.py``
-        in place - ``T = 1.0`` (raw logits) and ``tau = 0.0`` (nothing is rejected
-        for low confidence) - so the application keeps serving the threshold-free
-        decision rule instead of crashing.
+        The canonical payload is
+        ``configs/calibration/<MODEL_NAME>_calibration_<version>.json``; the
+        version's checkpoint folder is also probed for a legacy copy. This method
+        never raises: an absent or unusable file leaves ``T = 1.0`` and
+        ``tau = 0.0`` in place, so the application keeps serving rather than
+        failing.
         """
         path = calibration.resolve_calibration_file(self.version)
         if path is not None:
@@ -379,6 +353,15 @@ class CommandInferencer:
         self._onnx_input_name = input_meta.name
         print(f"[+] Loaded ONNX Runtime session <- {self.onnx_path} (input {declared})")
 
+    def get_onnx_session(self):
+        """Return the cached ``(session, input_name)`` of the ONNX graph.
+
+        Loads the graph on first use so real-time callers reuse the session that
+        ``predict(..., backend="onnx")`` uses instead of opening a second one.
+        """
+        self._load_onnx()
+        return self._onnx_session, self._onnx_input_name
+
     @property
     def is_ready(self) -> bool:
         return bool(self.available_backends)
@@ -472,9 +455,6 @@ class CommandInferencer:
             for index in order
         ]
         return decision
-
-
-CommandSenseInferencer = CommandInferencer
 
 
 if __name__ == "__main__":

@@ -1,33 +1,40 @@
-"""Real-time microphone keyword spotting for the configured release.
+"""Reusable real-time keyword spotting for the configured release.
 
-Run with:  python listen.py
+:class:`KeywordSpotter` owns one microphone session and runs capture, feature
+extraction, ONNX inference and cooldown in a background thread. The Gradio
+interface in ``app.py`` consumes it through ``start``, ``stop`` and ``poll``,
+and the class can also be embedded directly::
 
-The script captures 16 kHz mono float32 audio with ``sounddevice``, keeps it in a
-ring buffer and classifies one 1.0 s window every 0.5 s (50 % overlap). The
-artifact paths are never written down here: ``src.inference.CommandInferencer``
-resolves the ONNX graph, the labels and the calibration payload of the
-``MODEL_VERSION`` selected in ``configs/config.py``, so this file does not need
-to know whether that release ships an INT8 or a float32 graph.
+    spotter = KeywordSpotter(MODEL_VERSION)
+    spotter.start()
+    try:
+        while True:
+            for detection in spotter.poll():
+                print(detection.label, detection.confidence)
+            time.sleep(0.1)
+    finally:
+        spotter.stop()
 
-Preprocessing matches training exactly: the captured float32 signal is clamped
-and quantized onto the int16 grid the dataset cache uses (scale 32767), then fed
-as float32 to the shared ``AudioToThreeChannelMel`` transform, whose normalizer
-is 32768. The transform runs in ``eval()`` mode, so no augmentation is applied,
-and its output is checked against ``[1, 3, 64, 63]`` before inference.
-
-Calibration follows the deployment contract: the graph returns raw logits and
-``softmax(logits / T)`` is applied in Python. A window is printed as a command
-only when its top-1 probability reaches ``tau``, its label is not one of the
-reject classes, and the 1.5 s cooldown that follows a detection has elapsed.
+:class:`SharedRuntime` resolves the labels, ONNX graph and calibration payload
+through ``src.inference.CommandInferencer`` and caches one runtime per release,
+so this module never names an artifact path. Preprocessing mirrors training:
+the signal is clamped and quantized onto the int16 grid, then passed to the
+shared ``AudioToThreeChannelMel`` transform in evaluation mode. The graph
+returns raw logits; ``softmax(logits / T)`` is applied in Python. A window is
+published only when its top-1 probability reaches ``tau``, its label is not a
+rejection class, and the cooldown has elapsed.
 """
 
 from __future__ import annotations
 
-import argparse
 import os
+import queue
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -44,20 +51,13 @@ from configs.config import (  # noqa: E402
     REJECTION_CLASSES,
     SAMPLE_RATE,
     TARGET_SAMPLES,
-    calibration_path,
 )
-from src import calibration  # noqa: E402
 from src.inference import (  # noqa: E402
     RELEASES_URL,
     CommandInferencer,
     ModelUnavailableError,
 )
 from src.transforms import AudioToThreeChannelMel  # noqa: E402
-
-try:
-    import onnxruntime as ort
-except ImportError:  # reported by setup_runtime() with an actionable message
-    ort = None
 
 try:
     import sounddevice as sd
@@ -72,7 +72,7 @@ WINDOW_SECONDS = WINDOW_SAMPLES / SAMPLE_RATE
 HOP_SECONDS = HOP_SAMPLES / SAMPLE_RATE
 
 # A detection is reported at most once per cooldown, so consecutive overlapping
-# windows that hear the same word cannot spam the console.
+# windows that hear the same word cannot spam the detection history.
 COOLDOWN_SECONDS = 1.5
 
 # 100 ms capture blocks keep the callback cheap; the ring holds four seconds, so
@@ -81,11 +81,6 @@ BLOCK_SAMPLES = SAMPLE_RATE // 10
 RING_SECONDS = 4.0
 RING_CAPACITY = int(round(SAMPLE_RATE * RING_SECONDS))
 POLL_SECONDS = 0.02
-
-# Console status line: ASCII spinner, redrawn in place, padded to a fixed width.
-STATUS_INTERVAL = 0.12
-STATUS_WIDTH = 78
-SPINNER = "|/-\\"
 
 # Training caches int16 PCM obtained with round(clamp(audio) * 32767); the shared
 # transform divides by 32768. The microphone signal is put on the same grid.
@@ -99,50 +94,27 @@ class SetupError(RuntimeError):
     """Raised when a required artifact, backend or device is unavailable."""
 
 
-class StatusLine:
-    """Single-line ``Listening...`` status with an ASCII spinner.
+@dataclass(frozen=True)
+class Detection:
+    """One accepted command emitted by :class:`KeywordSpotter`."""
 
-    When stdout is redirected, the animated line is suppressed so a log file is
-    not filled with carriage returns; detected commands are still printed.
-    """
-
-    def __init__(self, stream=None):
-        self._stream = stream if stream is not None else sys.stdout
-        self._frame = 0
-        self._last_render = 0.0
-        self._visible = False
+    label: str
+    confidence: float
+    timestamp: float
 
     @property
-    def interactive(self) -> bool:
-        return bool(self._stream.isatty())
+    def time_text(self) -> str:
+        """Local wall-clock time of the detection, formatted ``HH:MM:SS``."""
+        return datetime.fromtimestamp(self.timestamp).strftime("%H:%M:%S")
 
-    def update(self, detail: str = "", force: bool = False) -> None:
-        if not self.interactive:
-            return
-        now = time.monotonic()
-        if not force and now - self._last_render < STATUS_INTERVAL:
-            return
-        self._last_render = now
-
-        frame = SPINNER[self._frame % len(SPINNER)]
-        self._frame += 1
-        text = f"Listening... {frame}"
-        if detail:
-            text = f"{text}  {detail}"
-        self._stream.write("\r" + text[:STATUS_WIDTH].ljust(STATUS_WIDTH))
-        self._stream.flush()
-        self._visible = True
-
-    def clear(self) -> None:
-        if self._visible and self.interactive:
-            self._stream.write("\r" + " " * STATUS_WIDTH + "\r")
-            self._stream.flush()
-        self._visible = False
-
-    def announce(self, message: str) -> None:
-        self.clear()
-        self._stream.write(message + "\n")
-        self._stream.flush()
+    def as_dict(self) -> dict:
+        """Return a JSON-friendly representation for a polling UI."""
+        return {
+            "label": self.label,
+            "confidence": self.confidence,
+            "timestamp": self.timestamp,
+            "time": self.time_text,
+        }
 
 
 class AudioRingBuffer:
@@ -184,7 +156,7 @@ class AudioRingBuffer:
             self._write_index = (self._write_index + count) % self._capacity
             self._total_written += count
 
-    def read(self, end: int, count: int) -> np.ndarray:
+    def read(self, end: int, count: int) -> Optional[np.ndarray]:
         """Return samples ``[end - count, end)``, or ``None`` if overwritten."""
         if count <= 0 or count > self._capacity:
             raise ValueError("count must be in [1, capacity].")
@@ -208,450 +180,669 @@ class AudioRingBuffer:
 
 
 class FeatureFrontend:
-    """Microphone float32 -> ``[1, 3, N_MELS, 63]`` float32 features.
-
-    Reuses the exact ``AudioToThreeChannelMel`` deployed by training, validation
-    and ONNX export. The module is kept in ``eval()`` mode, which disables both
-    waveform augmentation and SpecAugment.
-    """
+    """Training-identical waveform to ``[1, 3, 64, 63]`` mel conversion."""
 
     def __init__(self):
-        self.extractor = AudioToThreeChannelMel().eval()
+        self._transform = AudioToThreeChannelMel(n_mels=N_MELS)
+        self._transform.eval()
+        if hasattr(self._transform, "augment"):
+            self._transform.augment = False
 
-    def __call__(self, window: np.ndarray) -> np.ndarray:
-        samples = np.ascontiguousarray(window, dtype=np.float32).reshape(-1)
+    def __call__(self, waveform: np.ndarray) -> np.ndarray:
+        samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
         if samples.size != WINDOW_SAMPLES:
-            raise ValueError(
-                f"Expected {WINDOW_SAMPLES} samples (1.0 s at {SAMPLE_RATE} Hz), "
-                f"got {samples.size}."
+            raise ValueError(f"Expected {WINDOW_SAMPLES} samples, got {samples.size}.")
+        if not np.isfinite(samples).all():
+            samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+        samples = np.clip(samples, -1.0, 1.0)
+        samples = np.round(samples * INT16_SCALE).astype(np.float32)
+
+        with torch.inference_mode():
+            tensor = torch.from_numpy(samples.copy()).unsqueeze(0)
+            features = self._transform(tensor)
+            batch = features.detach().cpu().numpy().astype(np.float32)
+
+        if batch.shape != EXPECTED_SHAPE:
+            raise SetupError(
+                f"Unexpected input shape {tuple(batch.shape)}; the model expects {EXPECTED_SHAPE}."
             )
-
-        # Dataset parity: quantize to the int16 grid before the transform, which
-        # normalizes by 32768 exactly as it does for the raw-audio cache.
-        waveform = torch.from_numpy(samples).clamp(-1.0, 1.0) * INT16_SCALE
-        waveform = torch.round(waveform).to(torch.int16).to(torch.float32)
-        waveform = waveform.view(1, 1, WINDOW_SAMPLES)
-
-        with torch.no_grad():
-            features = self.extractor(waveform)
-
-        features = features.detach().cpu().to(torch.float32).contiguous().numpy()
-        if features.shape != EXPECTED_SHAPE:
-            raise RuntimeError(
-                f"Feature shape {tuple(features.shape)} does not match the "
-                f"expected {EXPECTED_SHAPE}."
+        if not np.isfinite(batch).all():
+            raise SetupError(
+                "Feature extraction produced non-finite values; the input is unusable."
             )
-        return features
+        return np.ascontiguousarray(batch)
 
 
 class OnnxKeywordSpotter:
-    """CPU-only ONNX Runtime session with temperature scaling and rejection."""
+    """Temperature-scaled classifier that reuses the shared ONNX session.
 
-    def __init__(self, onnx_path, labels, temperature: float, threshold: float):
-        if ort is None:
-            raise SetupError(
-                "[ERROR] onnxruntime is not installed. Install it with "
-                "'pip install onnxruntime'."
-            )
+    The session comes from :meth:`CommandInferencer.get_onnx_session`, so the
+    real-time loop and the single-recording tab execute the very same graph.
+    ``session.run`` is serialized by the runtime lock because both tabs can
+    classify concurrently.
+    """
 
-        try:
-            self.session = ort.InferenceSession(
-                str(onnx_path), providers=["CPUExecutionProvider"]
-            )
-        except Exception as exc:
-            raise SetupError(
-                f"[ERROR] Could not load the ONNX graph '{onnx_path}': "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-
+    def __init__(
+        self,
+        session,
+        input_name: str,
+        labels: List[str],
+        temperature: float,
+        threshold: float,
+    ):
+        self.session = session
+        self.input_name = input_name
         self.labels = list(labels)
         self.temperature = float(temperature)
         self.threshold = float(threshold)
-        self._validate_io(str(onnx_path))
-        self.input_name = self.session.get_inputs()[0].name
+        self._validate_io()
 
-    def _validate_io(self, onnx_path: str) -> None:
+    def _validate_io(self) -> None:
         inputs = self.session.get_inputs()
         if len(inputs) != 1:
             raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' must expose exactly one input, "
-                f"found {len(inputs)}."
+                f"The ONNX graph declares {len(inputs)} inputs; exactly one is expected."
             )
-
         declared = inputs[0].shape
         if len(declared) != 4:
+            raise SetupError(f"The ONNX graph declares input shape {declared}; rank 4 is expected.")
+        channels = declared[1]
+        if isinstance(channels, int) and channels != EXPECTED_CHANNELS:
             raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' has an unexpected input rank "
-                f"{declared}; expected [batch, 3, {N_MELS}, {EXPECTED_FRAMES}]."
+                f"The ONNX graph declares {channels} input channels; "
+                f"{EXPECTED_CHANNELS} are expected."
             )
-        if declared[1] not in (EXPECTED_CHANNELS, str(EXPECTED_CHANNELS)):
+        frames = declared[3]
+        if isinstance(frames, int) and frames != EXPECTED_FRAMES:
             raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' declares {declared[1]} input "
-                f"channels; this pipeline builds {EXPECTED_CHANNELS}."
+                f"The ONNX graph expects {frames} time frames; {EXPECTED_FRAMES} are expected."
             )
-        if isinstance(declared[3], int) and declared[3] != EXPECTED_FRAMES:
+        if inputs[0].name != self.input_name:
             raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' expects {declared[3]} time "
-                f"frames; the front-end produces {EXPECTED_FRAMES}."
+                f"The ONNX graph input is named '{inputs[0].name}', not '{self.input_name}'."
             )
 
         outputs = self.session.get_outputs()
-        if len(outputs) != 1:
-            raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' must expose exactly one output, "
-                f"found {len(outputs)}."
-            )
-        classes = outputs[0].shape[-1]
+        if not outputs:
+            raise SetupError("The ONNX graph declares no outputs.")
+        classes = outputs[0].shape[-1] if outputs[0].shape else None
         if isinstance(classes, int) and classes != len(self.labels):
             raise SetupError(
-                f"[ERROR] ONNX graph '{onnx_path}' emits {classes} logits but "
+                f"The ONNX graph returns {classes} classes but "
                 f"{len(self.labels)} labels were loaded."
             )
 
-    def predict(self, features: np.ndarray):
-        """Return ``(label, calibrated_confidence)`` for one feature window."""
+    def predict(self, features: np.ndarray) -> Tuple[str, float]:
+        """Return the top-1 label and its temperature-scaled probability."""
         logits = self.session.run(None, {self.input_name: features})[0]
-        logits = np.asarray(logits, dtype=np.float32).reshape(-1)
+        logits = np.asarray(logits, dtype=np.float64).reshape(-1)
         if logits.size != len(self.labels):
-            raise RuntimeError(
-                f"Model returned {logits.size} logits for {len(self.labels)} labels."
+            raise SetupError(
+                f"The ONNX graph returned {logits.size} logits for {len(self.labels)} labels."
             )
-
-        probabilities = calibration.logits_to_probabilities(
-            logits, self.temperature
-        ).reshape(-1)
-        index = int(np.argmax(probabilities))
+        scaled = logits / self.temperature
+        scaled -= scaled.max()
+        probabilities = np.exp(scaled)
+        probabilities /= probabilities.sum()
+        index = int(probabilities.argmax())
         return self.labels[index], float(probabilities[index])
 
 
-def _validate_calibration(payload: dict, path):
-    """Return ``(temperature, threshold)`` or raise an actionable error."""
-    missing = [
-        key for key in ("temperature", "confidence_threshold") if key not in payload
-    ]
-    if missing:
-        raise SetupError(
-            f"[ERROR] Calibration file '{path}' is missing "
-            f"{', '.join(missing)}. Re-fit it with 'python evaluate.py'."
+class SharedRuntime:
+    """Artifacts of one release, loaded once and shared by every consumer.
+
+    ``engine`` resolves ``MODEL_VERSION`` and reads the labels and calibration
+    payload. The ONNX session is materialised once here; the real-time spotter
+    runs on that exact session, and ``inference_lock`` serializes ``session.run``
+    across the background loop and the single-recording tab.
+    """
+
+    def __init__(self, model_version: str = MODEL_VERSION, device=None):
+        self.model_version = str(model_version)
+        try:
+            self.engine = CommandInferencer(version=self.model_version, device=device)
+        except ModelUnavailableError as exc:
+            raise SetupError(
+                f"[ERROR] Model {MODEL_NAME} {self.model_version} was not found. "
+                f"Download the release bundle from the GitHub Releases page ({RELEASES_URL}) "
+                "or generate it locally with 'python export_onnx.py' "
+                "(then 'python quantize_int8.py')."
+            ) from exc
+        except Exception as exc:
+            raise SetupError(
+                f"[ERROR] Could not initialise {MODEL_NAME} {self.model_version}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        self.labels = list(self.engine.labels)
+        self.temperature = float(self.engine.temperature)
+        self.threshold = float(self.engine.confidence_threshold)
+        self.calibration_source = self.engine.calibration_source
+        self.onnx_path = self.engine.onnx_path
+        self.pth_path = self.engine.pth_path
+        self.warmup_ms = 0.0
+        self.frontend: Optional[FeatureFrontend] = None
+        self.spotter: Optional[OnnxKeywordSpotter] = None
+        self.inference_lock = threading.Lock()
+
+        if self.onnx_path is not None and "onnx" in self.engine.available_backends:
+            self._initialise_onnx()
+
+    def _initialise_onnx(self) -> None:
+        try:
+            session, input_name = self.engine.get_onnx_session()
+            self.frontend = FeatureFrontend()
+            self.spotter = OnnxKeywordSpotter(
+                session=session,
+                input_name=input_name,
+                labels=self.labels,
+                temperature=self.temperature,
+                threshold=self.threshold,
+            )
+        except SetupError:
+            raise
+        except Exception as exc:
+            raise SetupError(
+                f"[ERROR] Could not load the ONNX graph of {MODEL_NAME} "
+                f"{self.model_version}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        warmup = np.zeros(WINDOW_SAMPLES, dtype=np.float32)
+        with self.inference_lock:
+            started = time.perf_counter()
+            self.spotter.predict(self.frontend(warmup))
+            self.warmup_ms = (time.perf_counter() - started) * 1000.0
+        print(f"[+] Real-time front-end warmed up in {self.warmup_ms:.1f} ms")
+
+    @property
+    def realtime_available(self) -> bool:
+        """True when the graph, the front-end and a calibration payload exist."""
+        return (
+            self.spotter is not None
+            and self.frontend is not None
+            and self.calibration_source is not None
         )
 
-    try:
-        temperature = float(payload["temperature"])
-        threshold = float(payload["confidence_threshold"])
-    except (TypeError, ValueError) as exc:
-        raise SetupError(
-            f"[ERROR] Calibration file '{path}' holds non-numeric values: {exc}."
-        ) from exc
-
-    if not np.isfinite(temperature) or temperature <= 0.0:
-        raise SetupError(
-            f"[ERROR] Calibration temperature must be a finite number > 0, "
-            f"got {temperature} in '{path}'."
-        )
-    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
-        raise SetupError(
-            f"[ERROR] Calibration threshold must be a probability in [0, 1], "
-            f"got {threshold} in '{path}'."
-        )
-    return temperature, threshold
-
-
-def setup_runtime():
-    """Resolve the configured release and build the front-end and ONNX engine."""
-    try:
-        engine = CommandInferencer(version=MODEL_VERSION, device="cpu")
-    except ModelUnavailableError as exc:
-        raise SetupError(
-            f"[ERROR] Model {MODEL_NAME} {MODEL_VERSION} was not found. "
-            f"Download the release bundle from the GitHub Releases page "
-            f"({RELEASES_URL}) or generate it locally with "
-            "'python export_onnx.py' (then 'python quantize_int8.py')."
-        ) from exc
-    except Exception as exc:
-        raise SetupError(
-            f"[ERROR] Could not initialise {MODEL_NAME} {MODEL_VERSION}: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
-
-    if engine.onnx_path is None:
-        raise SetupError(
-            f"[ERROR] No ONNX graph was found for {MODEL_NAME} {MODEL_VERSION}. "
-            f"Download the release bundle from the GitHub Releases page "
-            f"({RELEASES_URL}) or generate it locally with "
-            "'python export_onnx.py' (then 'python quantize_int8.py')."
-        )
-
-    calibration_file = calibration.resolve_calibration_file(MODEL_VERSION)
-    if calibration_file is None:
-        raise SetupError(
-            f"[ERROR] The calibration file for {MODEL_NAME} {MODEL_VERSION} was "
-            f"not found. Expected '{calibration_path(MODEL_VERSION)}' or a copy "
-            "next to the checkpoints. Fit it with 'python evaluate.py' or "
-            f"download the release bundle from the GitHub Releases page "
-            f"({RELEASES_URL})."
-        )
-
-    payload = calibration.load_calibration(calibration_file)
-    if not payload:
-        raise SetupError(
-            f"[ERROR] Calibration file '{calibration_file}' could not be read or "
-            "is not valid JSON. Re-fit it with 'python evaluate.py' or download "
-            f"the release bundle from the GitHub Releases page ({RELEASES_URL})."
-        )
-    temperature, threshold = _validate_calibration(payload, calibration_file)
-
-    frontend = FeatureFrontend()
-    spotter = OnnxKeywordSpotter(
-        engine.onnx_path, engine.labels, temperature, threshold
-    )
-    info = {
-        "model_path": engine.onnx_path,
-        "calibration_path": str(calibration_file),
-        "temperature": temperature,
-        "threshold": threshold,
-        "labels": len(engine.labels),
-    }
-    return frontend, spotter, info
+    def require_realtime(self) -> None:
+        """Raise :class:`SetupError` when the real-time tab cannot run."""
+        if self.onnx_path is None:
+            raise SetupError(
+                f"[ERROR] No ONNX graph was found for {MODEL_NAME} {self.model_version}. "
+                f"Download the release bundle from the GitHub Releases page ({RELEASES_URL}) "
+                "or generate it locally with 'python export_onnx.py' "
+                "(then 'python quantize_int8.py')."
+            )
+        if "onnx" not in self.engine.available_backends:
+            raise SetupError(
+                "[ERROR] onnxruntime is not installed. Install it with "
+                "'pip install onnxruntime' and restart the application."
+            )
+        if self.calibration_source is None:
+            raise SetupError(
+                f"[ERROR] The calibration file for {MODEL_NAME} {self.model_version} "
+                "was not found. Real-time spotting needs the fitted temperature and "
+                "threshold. Fit them with 'python evaluate.py' or download the release "
+                f"bundle ({RELEASES_URL})."
+            )
 
 
-def open_microphone(buffer: AudioRingBuffer, callback_status: list, device=None):
-    """Open and start the 16 kHz mono float32 input stream."""
+_RUNTIMES: Dict[Tuple[str, str], SharedRuntime] = {}
+_RUNTIMES_LOCK = threading.Lock()
+
+
+def get_shared_runtime(model_version: str = MODEL_VERSION, device=None) -> SharedRuntime:
+    """Return the process-wide runtime of ``model_version``, loading it once.
+
+    Concurrent callers wait for the first load and then receive the same
+    instance, so the ONNX session, the mel front-end and the calibration values
+    exist exactly once regardless of how many tabs or threads use them.
+    """
+    key = (str(model_version), str(device))
+    with _RUNTIMES_LOCK:
+        runtime = _RUNTIMES.get(key)
+        if runtime is None:
+            runtime = SharedRuntime(model_version=model_version, device=device)
+            _RUNTIMES[key] = runtime
+    return runtime
+
+
+def query_input_devices() -> List[dict]:
+    """Return the capturable input devices, or ``[]`` when none can be listed.
+
+    ``sounddevice`` reports every host device, including output-only ones, so
+    only devices with at least one input channel are kept. A missing PortAudio
+    library or missing ``sounddevice`` yields an empty list instead of raising,
+    which lets the UI stay usable for single-recording analysis.
+    """
     if sd is None:
-        raise SetupError(
-            "[ERROR] sounddevice is not installed. Install the microphone "
-            "dependency with 'pip install sounddevice'."
-        )
-
-    def callback(indata, frames, time_info, status):
-        # The callback runs on the audio thread: never print or raise here.
-        if status:
-            callback_status[0] = str(status)
-        buffer.write(indata[:, 0])
-
-    stream = None
-    try:
-        stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=BLOCK_SAMPLES,
-            device=device,
-            callback=callback,
-        )
-        stream.start()
-    except Exception as exc:
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
-        raise SetupError(
-            f"[ERROR] Could not open a {SAMPLE_RATE} Hz mono input stream: "
-            f"{type(exc).__name__}: {exc}. Check the microphone, or run "
-            "'python listen.py --list-devices' and pass '--device <index>'."
-        ) from exc
-    return stream
-
-
-def list_input_devices() -> int:
-    """Print the devices that can capture audio."""
-    if sd is None:
-        print(
-            "[ERROR] sounddevice is not installed. Install it with "
-            "'pip install sounddevice'.",
-            file=sys.stderr,
-        )
-        return 1
-
+        return []
     try:
         devices = sd.query_devices()
-    except Exception as exc:
-        print(
-            f"[ERROR] Could not query audio devices: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
+    except Exception:
+        return []
 
-    print("Input devices:")
-    found = False
+    result = []
     for index, info in enumerate(devices):
-        channels = int(info.get("max_input_channels", 0))
+        channels = int(info.get("max_input_channels", 0) or 0)
         if channels <= 0:
             continue
-        found = True
-        rate = int(round(float(info.get("default_samplerate", 0) or 0)))
-        print(f"  [{index}] {info.get('name', 'unknown')} ({channels} ch, {rate} Hz)")
-    if not found:
-        print("  (none)")
-    return 0
+        result.append(
+            {
+                "index": int(index),
+                "name": str(info.get("name", f"Device {index}")),
+                "channels": channels,
+                "default_samplerate": float(info.get("default_samplerate", 0.0) or 0.0),
+            }
+        )
+    return result
 
 
-def listen(device=None) -> int:
-    """Run the capture, inference and status loop until Ctrl+C."""
+def open_microphone(
+    buffer: AudioRingBuffer,
+    status: List[Optional[str]],
+    device: Optional[int] = None,
+):
+    """Open a 16 kHz mono input stream that feeds ``buffer``.
+
+    The callback runs on PortAudio's thread and only converts the block to
+    mono float32 before appending it to the ring, so it stays short. Failures
+    are stored in ``status[0]`` for the consumer to report instead of being
+    raised from the audio thread.
+    """
     if sd is None:
-        print(
-            "[ERROR] sounddevice is not installed. Install the microphone "
-            "dependency with 'pip install sounddevice'.",
-            file=sys.stderr,
+        raise SetupError(
+            "[ERROR] sounddevice is not installed. Install it with "
+            "'pip install sounddevice' and restart the application."
         )
-        return 1
 
-    status = StatusLine()
-
-    try:
-        frontend, spotter, info = setup_runtime()
-    except SetupError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-    print(f"[+] {MODEL_NAME} {MODEL_VERSION}")
-    print(f"[+] ONNX graph        : {info['model_path']}")
-    print(f"[+] Calibration       : {info['calibration_path']}")
-    print(f"[+] Temperature (T)   : {info['temperature']:.4f}")
-    print(f"[+] Threshold (tau)   : {info['threshold']:.2f}")
-    print(f"[+] Classes           : {info['labels']}")
-    print(f"[+] Window / stride   : {WINDOW_SECONDS:.1f} s / {HOP_SECONDS:.1f} s")
-    print(f"[+] Rejection classes : {', '.join(REJECTION_CLASSES)}")
+    def _callback(indata, frames, time_info, status_flag):
+        if status_flag:
+            status[0] = str(status_flag)
+        block = np.asarray(indata, dtype=np.float32)
+        if block.ndim == 2:
+            block = block.mean(axis=1)
+        buffer.write(block)
 
     try:
-        started = time.perf_counter()
-        spotter.predict(frontend(np.zeros(WINDOW_SAMPLES, dtype=np.float32)))
-        warmup_ms = (time.perf_counter() - started) * 1000.0
+        return sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            blocksize=BLOCK_SAMPLES,
+            channels=1,
+            dtype="float32",
+            callback=_callback,
+            device=device,
+        )
     except Exception as exc:
-        print(
-            f"[ERROR] Warm-up inference failed: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"[+] Warm-up           : {warmup_ms:.1f} ms (front-end + ONNX CPU)")
+        raise SetupError(
+            f"[ERROR] Could not open the microphone: {type(exc).__name__}: {exc}. "
+            "Check the operating-system microphone permissions or pick another "
+            "input device."
+        ) from exc
 
-    buffer = AudioRingBuffer(RING_CAPACITY)
-    callback_status = [None]
-    try:
-        stream = open_microphone(buffer, callback_status, device=device)
-    except SetupError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
 
-    print(f"[*] Listening at {SAMPLE_RATE} Hz mono. Press Ctrl+C to stop.")
-    status.update("")
+class KeywordSpotter:
+    """Drive one microphone session against the shared release.
 
-    next_end = WINDOW_SAMPLES
-    cooldown_until = 0.0
-    last_detail = ""
-    last_stream_warning = 0.0
+    Parameters
+    ----------
+    model_version:
+        Release to serve; defaults to ``MODEL_VERSION`` from
+        ``configs/config.py``. The matching ONNX graph, labels and calibration
+        payload are resolved by :class:`SharedRuntime`.
+    device:
+        ``sounddevice`` input-device index, or ``None`` for the system default.
+        Indices are the ones returned by :func:`query_input_devices`.
 
-    try:
-        with stream:
-            while True:
-                stream_status = callback_status[0]
-                if stream_status:
-                    callback_status[0] = None
+    The constructor validates that the release can serve the real-time tab and
+    raises :class:`SetupError` otherwise; the microphone is opened by
+    :meth:`start`, so no device is held while the UI is idle.
+    """
+
+    def __init__(self, model_version: str = MODEL_VERSION, device: Optional[int] = None):
+        self.model_version = str(model_version)
+        self.device = device
+        self._runtime = get_shared_runtime(self.model_version)
+        self._runtime.require_realtime()
+
+        self._buffer: Optional[AudioRingBuffer] = None
+        self._stream = None
+        self._stream_status: List[Optional[str]] = [None]
+        self._stop_event = threading.Event()
+        self._detections: "queue.Queue[Detection]" = queue.Queue()
+        self._lock = threading.RLock()
+        self._thread: Optional[threading.Thread] = None
+        self._error: Optional[str] = None
+        self._last_window: Optional[dict] = None
+        self._last_rejected: Optional[dict] = None
+        self._cooldown_until = 0.0
+        self._stream_warning: Optional[str] = None
+
+    @property
+    def runtime(self) -> SharedRuntime:
+        """The shared runtime this spotter classifies with."""
+        return self._runtime
+
+    @property
+    def labels(self) -> List[str]:
+        return list(self._runtime.labels)
+
+    @property
+    def temperature(self) -> float:
+        return self._runtime.temperature
+
+    @property
+    def threshold(self) -> float:
+        return self._runtime.threshold
+
+    @property
+    def warmup_ms(self) -> float:
+        return self._runtime.warmup_ms
+
+    @property
+    def error(self) -> Optional[str]:
+        with self._lock:
+            return self._error
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            thread = self._thread
+            return thread is not None and thread.is_alive()
+
+    def start(self) -> bool:
+        """Open the microphone and begin classifying in a daemon thread.
+
+        Returns ``False`` when the loop is already running. Raises
+        :class:`SetupError` when the microphone cannot be opened; in that case
+        the spotter stays idle and can be started again after the device or the
+        operating-system permissions are fixed.
+        """
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            buffer = AudioRingBuffer(RING_CAPACITY)
+            stream_status: List[Optional[str]] = [None]
+            stream = open_microphone(buffer, stream_status, device=self.device)
+            try:
+                stream.start()
+            except Exception as exc:
+                self._release_stream(stream)
+                raise SetupError(
+                    f"[ERROR] Could not start the microphone: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+            self._buffer = buffer
+            self._stream = stream
+            self._stream_status = stream_status
+            self._detections = queue.Queue()
+            self._stop_event.clear()
+            self._error = None
+            self._last_window = None
+            self._last_rejected = None
+            self._cooldown_until = 0.0
+            self._stream_warning = None
+            self._thread = threading.Thread(
+                target=self._run,
+                name=f"KeywordSpotter-{self.model_version}",
+                daemon=True,
+            )
+            thread = self._thread
+
+        thread.start()
+        return True
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Signal the loop, join it and release the microphone.
+
+        Safe to call repeatedly and from any thread. Returns ``True`` when the
+        worker has finished; ``False`` only if it did not join within
+        ``timeout`` seconds, in which case the microphone is still released so a
+        later ``start`` can open it again.
+        """
+        with self._lock:
+            thread = self._thread
+            self._stop_event.set()
+
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+        finished = thread is None or not thread.is_alive()
+
+        with self._lock:
+            if finished:
+                self._thread = None
+                self._cooldown_until = 0.0
+            stream, self._stream = self._stream, None
+            self._buffer = None
+            self._stream_status = [None]
+
+        self._release_stream(stream)
+        return finished
+
+    def close(self) -> None:
+        """Alias of :meth:`stop` for callers that release resources explicitly."""
+        self.stop()
+
+    def __enter__(self) -> "KeywordSpotter":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.stop()
+        return False
+
+    def poll(self) -> List[Detection]:
+        """Return the accepted detections since the previous call.
+
+        Non-blocking: the background loop pushes accepted commands into a
+        thread-safe queue and the caller drains it, so the UI never waits on
+        inference and no detection is lost between polls.
+        """
+        detections: List[Detection] = []
+        pending = self._detections
+        while True:
+            try:
+                detections.append(pending.get_nowait())
+            except queue.Empty:
+                break
+        return detections
+
+    def status(self) -> dict:
+        """Thread-safe snapshot of the loop for a polling UI.
+
+        ``last_window`` describes the most recent classified window (accepted or
+        not) and ``last_rejected`` the most recent low-confidence guess, so the
+        interface can show current confidence without storing duplicate state.
+        """
+        with self._lock:
+            thread = self._thread
+            running = thread is not None and thread.is_alive()
+            state = "listening" if running else ("error" if self._error else "idle")
+            return {
+                "state": state,
+                "running": running,
+                "error": self._error,
+                "last_window": dict(self._last_window) if self._last_window else None,
+                "last_rejected": dict(self._last_rejected) if self._last_rejected else None,
+                "cooldown_remaining": max(0.0, self._cooldown_until - time.monotonic()),
+                "temperature": self._runtime.temperature,
+                "threshold": self._runtime.threshold,
+                "warmup_ms": self._runtime.warmup_ms,
+                "model_name": MODEL_NAME,
+                "model_version": self.model_version,
+                "stream_warning": self._stream_warning,
+            }
+
+    @staticmethod
+    def _release_stream(stream) -> None:
+        if stream is None:
+            return
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def _publish(
+        self,
+        label: str,
+        confidence: float,
+        accepted: bool,
+        reason: str,
+        timestamp: float,
+    ) -> None:
+        """Store the classified window for ``status()`` (never blocks inference)."""
+        record = {
+            "label": label,
+            "confidence": float(confidence),
+            "accepted": bool(accepted),
+            "reason": reason,
+            "timestamp": timestamp,
+        }
+        with self._lock:
+            self._last_window = record
+            if not accepted:
+                self._last_rejected = record
+
+    def _run(self) -> None:
+        """Classify one 1.0 s window every 0.5 s until ``stop`` is called."""
+        runtime = self._runtime
+        spotter = runtime.spotter
+        frontend = runtime.frontend
+        buffer = self._buffer
+        stream_status = self._stream_status
+        next_end = max(WINDOW_SAMPLES, buffer.total_written)
+        cooldown_until = 0.0
+        last_stream_warning = 0.0
+
+        try:
+            while not self._stop_event.is_set():
+                warning = stream_status[0]
+                if warning:
+                    stream_status[0] = None
                     now = time.monotonic()
                     if now - last_stream_warning >= 5.0:
-                        status.announce(f"[WARN] Audio stream status: {stream_status}")
                         last_stream_warning = now
+                        with self._lock:
+                            self._stream_warning = str(warning)
 
                 total = buffer.total_written
-                now = time.monotonic()
-
                 if total < next_end:
-                    if now < cooldown_until:
-                        status.update(f"cooldown {cooldown_until - now:.1f}s")
-                    else:
-                        status.update(last_detail)
-                    time.sleep(POLL_SECONDS)
+                    self._stop_event.wait(POLL_SECONDS)
                     continue
-
-                # If the consumer fell further behind than the ring can hold, the
-                # pending windows are already overwritten: resynchronise instead
-                # of feeding the model discontinuous audio.
                 if total - next_end > RING_CAPACITY - WINDOW_SAMPLES:
-                    lag_seconds = (total - next_end) / SAMPLE_RATE
                     next_end = total
-                    status.announce(
-                        f"[WARN] Fell behind by {lag_seconds:.1f} s; "
-                        "skipped to the live audio."
-                    )
 
                 window = buffer.read(next_end, WINDOW_SAMPLES)
                 if window is None:
                     next_end = total
-                    time.sleep(POLL_SECONDS)
+                    self._stop_event.wait(POLL_SECONDS)
                     continue
                 next_end += HOP_SAMPLES
+                if self._stop_event.is_set():
+                    break
 
-                try:
-                    label, confidence = spotter.predict(frontend(window))
-                except Exception as exc:
-                    status.announce(
-                        f"[ERROR] Inference failed: {type(exc).__name__}: {exc}"
-                    )
-                    return 1
+                features = frontend(window)
+                with runtime.inference_lock:
+                    label, confidence = spotter.predict(features)
 
                 now = time.monotonic()
                 if confidence < spotter.threshold:
-                    last_detail = (
-                        f"rejected: {label} {confidence:.2f} < "
-                        f"tau {spotter.threshold:.2f}"
-                    )
+                    reason, accepted = "below_threshold", False
                 elif label in REJECTION_CLASSES:
-                    last_detail = f"idle: {label} {confidence:.2f}"
+                    reason, accepted = "reject_class", False
                 elif now < cooldown_until:
-                    last_detail = f"cooldown {cooldown_until - now:.1f}s"
+                    reason, accepted = "cooldown", False
                 else:
-                    status.announce(f"[DETECTED] {label} (conf: {confidence:.2f})")
+                    reason, accepted = "accepted", True
                     cooldown_until = now + COOLDOWN_SECONDS
-                    last_detail = ""
-                    continue
 
-                status.update(last_detail, force=True)
-    except KeyboardInterrupt:
-        pass
-    except Exception as exc:
-        status.announce(
-            f"[ERROR] Audio capture failed: {type(exc).__name__}: {exc}"
-        )
-        return 1
-    finally:
-        status.clear()
+                timestamp = time.time()
+                with self._lock:
+                    self._cooldown_until = cooldown_until
+                self._publish(label, confidence, accepted, reason, timestamp)
+                if accepted:
+                    self._detections.put(
+                        Detection(
+                            label=label,
+                            confidence=float(confidence),
+                            timestamp=timestamp,
+                        )
+                    )
+        except Exception as exc:
+            with self._lock:
+                self._error = f"{type(exc).__name__}: {exc}"
+        finally:
+            with self._lock:
+                self._cooldown_until = 0.0
 
-    print("[*] Stopped listening.")
-    return 0
 
+def _run_cli(argv: Optional[List[str]] = None) -> int:
+    """Optional command-line front-end, kept for scripted microphone checks."""
+    import argparse
 
-def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Real-time keyword spotting with the configured CommandSense release."
+        description=f"Real-time keyword spotting with {MODEL_NAME} {MODEL_VERSION}."
     )
     parser.add_argument(
         "--device",
-        help="Input device index or name; see --list-devices.",
+        type=int,
+        default=None,
+        help="sounddevice input-device index (default: system default).",
     )
     parser.add_argument(
         "--list-devices",
         action="store_true",
-        help="List the available audio input devices and exit.",
+        help="List the input devices that can be captured and exit.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
 
-
-def main(argv=None) -> int:
-    args = parse_args(argv)
     if args.list_devices:
-        return list_input_devices()
+        devices = query_input_devices()
+        if not devices:
+            print("[!] No capturable input devices were reported by sounddevice.")
+            return 1
+        for device in devices:
+            print(
+                f"  [{device['index']}] {device['name']} - "
+                f"{device['channels']} ch, "
+                f"{device['default_samplerate']:.0f} Hz"
+            )
+        return 0
 
-    device = args.device
-    if isinstance(device, str) and device.isdigit():
-        device = int(device)
-    return listen(device=device)
+    try:
+        spotter = KeywordSpotter(MODEL_VERSION, device=args.device)
+        spotter.start()
+    except SetupError as exc:
+        print(exc)
+        return 1
+
+    print(
+        f"[*] Listening with {MODEL_NAME} {MODEL_VERSION} "
+        f"(tau={spotter.threshold:.2f}). Press Ctrl+C to stop."
+    )
+    try:
+        while spotter.is_running:
+            for detection in spotter.poll():
+                print(
+                    f"{detection.time_text}  {detection.label}  "
+                    f"{detection.confidence * 100:.2f} %"
+                )
+            snapshot = spotter.status()
+            if snapshot["error"]:
+                print(f"[ERROR] {snapshot['error']}")
+                break
+            time.sleep(POLL_SECONDS * 5)
+    except KeyboardInterrupt:
+        print("\n[*] Stopping.")
+    finally:
+        spotter.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-
-
-
-
-
-
+    raise SystemExit(_run_cli())
