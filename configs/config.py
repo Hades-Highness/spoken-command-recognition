@@ -2,7 +2,7 @@ import torch
 from pathlib import Path
 
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v3.2"
+MODEL_VERSION = "v4.0"
 NUM_CLASSES = 37
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -41,6 +41,20 @@ PITCH_SHIFT_N_FFT = 512
 PITCH_SHIFT_BINS_PER_OCTAVE = 12
 TIME_SHIFT_PROB = 0.5
 TIME_SHIFT_RATIO = 0.10                   # max shift, as a share of the 1.0 s clip
+
+# SNR-based noise mixing (v4.0). Noise is mixed into the training waveforms on
+# the accelerator, never into a cached int16 clip. '_silence_' is excluded, it
+# has to stay pure background noise for the OOD boundary, and LibriSpeech is
+# mixed at a much higher SNR than ambient noise so a command always dominates
+# the background speech and its label cannot be corrupted.
+NOISE_MIX_PROB = 0.5                      # P(noise mixing) per training clip
+SNR_AMBIENT_MIN_DB = 5.0                  # '_background_noise_' SNR range
+SNR_AMBIENT_MAX_DB = 15.0
+SNR_SPEECH_MIN_DB = 15.0                  # LibriSpeech / '_unknown_' SNR range
+SNR_SPEECH_MAX_DB = 25.0
+NOISE_SPEECH_SOURCE_PROB = 0.5            # share of mixes drawn from LibriSpeech
+NOISE_BANK_AMBIENT_CLIPS = 256            # 1.0 s int16 noise clips kept in RAM
+NOISE_BANK_SPEECH_CLIPS = 512
 
 FREQ_MASK_PARAM = 8
 TIME_MASK_PARAM = 10
