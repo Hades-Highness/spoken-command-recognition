@@ -1,0 +1,135 @@
+============================================================
+     STATIC INT8 QUANTIZATION REPORT (CommandSense v4.0)
+============================================================
+
+Source checkpoint : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v4.0\CommandSense_v4.0.pth
+Source graph      : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v4.0\CommandSense_v4.0_fp32.onnx (opset 17, float32)
+INT8 graph        : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v4.0\CommandSense_v4.0_int8.onnx
+Quantization      : ONNX Runtime post-training static quantization
+                    format=QDQ, per_channel=True, activation=QInt8,
+                    weight=QInt8, calibrate_method=MinMax
+Input activation  : [-13.8155, 11.0512] (range observed while calibrating)
+
+--- CALIBRATION SPLIT PROVENANCE ---
+Activation ranges : 'validation', 500 of 10979 clips, rng seed 42
+                    ('testing' would leak the measurement split into the
+                    shipped artifact, so it is never calibrated on)
+T / tau source    : 'validation' too (evaluate.py fits them there), i.e. the
+                    one split used twice. That is why the shipped operating
+                    point is re-measured below instead of copied on faith.
+Measurement split : 'testing', 12105 clips (the whole split)
+                    - trained no weight, no activation range and no T/tau,
+                    and is never written back into the artifact.
+
+--- ARTIFACT SIZE ---
+float32 graph     : 4.643 MB (1,215,973 parameters)
+int8 graph        : 1.202 MB
+Compression       : 74.1% smaller (3.86x smaller file)
+
+--- OPERATING POINT AT T=1.252585, tau=0.92 ('testing', shipped pair) ---
+                          float32       int8       delta
+coverage                   88.99%     89.06%      +0.07 pt
+retained accuracy          99.58%     99.59%      +0.01 pt
+top-1 accuracy             95.94%     95.89%      -0.04 pt
+FRR                         7.63%      7.50%      -0.13 pt
+FAR                         9.15%      8.85%      -0.29 pt
+answered clips              10772      10781          +9
+|d coverage| = 0.07 pt <= 0.5 pt, so the shipped T/tau transfers to the
+quantized graph and v4.0 ships the same operating point; re-fitting on the int8
+logits would give T=1.252495, tau=0.92 - the same decision within noise.
+
+--- FIDELITY (INT8 vs float32, 'testing', 12105 clips) ---
+Top-1 agreement   : 99.53% of clips keep the float32 label (57 flips)
+Mean |d logit|    : 0.157294
+Max  |d logit|    : 8.047653 (informational, see notes)
+Mean |d softmax|  : 0.000202
+Max  |d softmax|  : 0.176057
+Per-class top-1 agreement (35 commands + 2 rejection classes):
+  35 commands      : 99.49% (11005 clips, 56 flips)
+  _silence_        : 100.00% (550 clips, 0 flips)
+  _unknown_        : 99.82% (550 clips, 1 flips)
+  classes with flips (31): _unknown_ (1), backward (1), bed (1), bird (2), dog (2), down (2), eight (1), five (1), follow (3), forward (1), four (1), go (2), happy (1), house (2), learn (1), left (2), marvin (1), no (5), off (2), on (3), one (1), right (5), seven (2), sheila (1), six (2), stop (1), three (2), tree (3), two (1), up (3), zero (1)
+  classes with no flips: 6
+
+--- CALIBRATION QUALITY (NLL / ECE / MCE, T=1 vs T=1.252585) ---
+
+--- int8 on 'validation' (calibration split): 10979 clips ---
+Samples            : 10979
+Top-1 accuracy (unchanged by temperature scaling): 96.3385%
+
+                  before (T=1)      after (T=1.2526)
+NLL                   0.133495              0.129083
+ECE                   0.007262              0.003696
+MCE                   0.156073              0.126902
+
+--- float32 on 'validation' (calibration split): 10979 clips ---
+Samples            : 10979
+Top-1 accuracy (unchanged by temperature scaling): 96.4113%
+
+                  before (T=1)      after (T=1.2526)
+NLL                   0.133312              0.128907
+ECE                   0.007027              0.004150
+MCE                   0.148710              0.116857
+
+--- int8 on 'testing' (measurement split): 12105 clips ---
+Samples            : 12105
+Top-1 accuracy (unchanged by temperature scaling): 95.8943%
+
+                  before (T=1)      after (T=1.2526)
+NLL                   0.144610              0.139561
+ECE                   0.008743              0.003528
+MCE                   0.138857              0.125951
+
+--- float32 on 'testing' (measurement split): 12105 clips ---
+Samples            : 12105
+Top-1 accuracy (unchanged by temperature scaling): 95.9356%
+
+                  before (T=1)      after (T=1.2526)
+NLL                   0.144669              0.139570
+ECE                   0.008538              0.004176
+MCE                   0.151054              0.092772
+
+--- LATENCY (median of 5 rounds x 200 clips, 1 clip/call, CPUExecutionProvider) ---
+Host              : Intel64 Family 6 Model 158 Stepping 10, GenuineIntel, 6 logical cores, Windows 11, python 3.13.1, onnxruntime 1.30.0
+float32 graph     : 1.671 ms/clip (min 1.222, max 3.155)
+int8 graph        : 2.630 ms/clip (min 2.455, max 3.094)
+int8 / float32    : 1.57x -> CPU latency is NOT improved by this
+                    quantization; the win is size, see notes.
+
+--- CALIBRATION ARTIFACT ---
+Served payload    : C:\Users\Administrator\Documents\Models\spoken-command-recognition\configs\calibration\CommandSense_calibration_v4.0.json
+T / tau           : 1.252585 / 0.92 (reused from v4.0)
+Resolved by       : calibration.resolve_calibration_file('v4.0'), a
+                    per-version lookup, so each release serves its own file.
+Graph metadata    : 17 'commandsense.calibration.*' entries, read back as T=1.252585, tau=0.92
+                    (a self-describing copy for a single-file runtime such as
+                    the v4.0 ONNX Runtime Web client; src/inference.py resolves
+                    T/tau from the JSON above, by version)
+
+--- NOTES ---
+* Size is the win, and the only one claimed: 74.1% smaller file
+  (4.643 MB -> 1.202 MB). CPU latency is not improved -
+  the int8 median is 2.630 ms/clip against 1.671 ms/clip for float32
+  (1.57x) on this host. ONNX Runtime's CPU QDQ path pays a
+  quantize/dequantize pair per activation and has no vectorized int8 kernel for
+  these small 3x64x63 activations, so this release makes no speed claim anywhere. The
+  v4.0 target is ONNX Runtime Web, whose WASM SIMD/WebNN kernels consume the QDQ
+  graph natively; tests/test_v3_1_quantization.py re-measures the ratio wherever
+  it runs instead of asserting one.
+* Absolute logit deviation is not a meaningful INT8 tolerance on this checkpoint.
+  Its logits span roughly +/-40, so a single int8 step is ~0.1-0.4 logit units and
+  the observed max |d logit| sits above 0.05 for every configuration tried
+  (MinMax/Entropy/Percentile, per_channel on/off, 50 vs 500 calibration clips,
+  float head kept in fp32, and dynamic quantization alike). The tolerance that
+  actually characterises a well-calibrated INT8 copy is the decision-space one:
+  top-1 agreement, the per-class flips above and mean |d softmax| - the bounds
+  tests/test_v3_1_quantization.py asserts, with its agreement floor derived from
+  this measurement instead of picked as a round number.
+* Split provenance: the activation ranges and T/tau both come from 'validation'
+  (the one split used twice, named at the top); every number above is measured
+  on 'testing', which fed nothing and is never written back. Same seed, same
+  ranges, same decision on a re-run.
+* The graph stays raw-logit: T and tau are applied by src/inference.py, so
+  changing the threshold never needs a re-export, and the values this graph
+  documents under 'commandsense.calibration.*' are exactly the ones the JSON
+  payload serves.
