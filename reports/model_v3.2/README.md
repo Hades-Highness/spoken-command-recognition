@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/FP32%20ONNX-SUPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
+
 ---
 
 ## ★ Model Overview

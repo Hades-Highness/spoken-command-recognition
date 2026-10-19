@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/ONNX-Supported-005ced?style=for-the-badge" alt="ONNX Runtime">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
+
 ---
 
 ## ★ Model Overview
