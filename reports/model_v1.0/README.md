@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v1.0.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/PyTorch-Supported-EE4C2C?style=for-the-badge" alt="PyTorch">
   <img src="https://img.shields.io/badge/ONNX-Supported-005ced?style=for-the-badge" alt="ONNX Runtime">
   <img src="https://img.shields.io/badge/Classes-35-blue?style=for-the-badge" alt="35 Classes">
 </p>

@@ -32,7 +32,7 @@
 
 CommandSense is an end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition. It features a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary (OOV) speech.
 
-The repository documents each released version with its own model card, metrics and artifacts. The current release (**v4.0**) is a robustness milestone: it retrains the model with **SNR-controlled noise mixing**, so the network learns to recognize commands even when background speech or ambient noise is present. Unlike v3.1 and v3.2, v4.0 trains new weights — the architecture is unchanged, but the training data now includes mixed-speech conditions that teach the model to extract the target command from a noisy window.
+The repository documents each released version with its own model card, metrics and artifacts. The current release (**v4.0**) adds **SNR-controlled noise mixing** during training to target robustness to background speech and ambient noise. Unlike v3.1 and v3.2, v4.0 trains new weights — the architecture is unchanged, but eligible command clips now include mixed-noise conditions. The robustness gain remains unmeasured because the published test metrics use clean audio.
 
 **What this repository is:** a reproducible pipeline (training, evaluation, ONNX/PyTorch inference, INT8 quantization, web demo), the metrics and calibration artifacts of all previous versions, and a model card per version.
 
@@ -42,21 +42,21 @@ The repository documents each released version with its own model card, metrics 
 
 ## Results
 
-### Headline (v4.0 Robustness Release)
+### Headline (v4.0 Noise-Mixing Release)
 
 | Metric | Value | Source of truth |
 | :-- | :-- | :-- |
 | **Test Accuracy (35 cmd)** | **95.6111%** (10,522 / 11,005) | `reports/model_v4.0/report_v4.0.txt` |
 | **Validation Accuracy** | **96.41%** | `reports/model_v4.0/report_v4.0.txt` |
-| **Noise mixing** | 50% of training clips mixed at controlled SNR | `configs/config.py` |
+| **Noise mixing** | 50% of eligible training clips mixed at controlled SNR | `configs/config.py` |
 | **Artifact Size (FP32)** | 4.67 MB | `checkpoints/model_v4.0/CommandSense_v4.0.pth` |
 | **Parameters** | 1,217,349 | `src/models.py` |
 
-v4.0 trades a small amount of clean-audio accuracy (−0.26 pt on the 35-command test split versus v3.0) for robustness to overlapping speech and background noise. The model is trained with 50% of its clips mixed with ambient noise (5–15 dB SNR) or background speech (15–25 dB SNR), so it learns to extract the target command from a noisy window rather than assuming a clean signal.
+v4.0 has a 0.26-point lower score on the clean 35-command test split than v3.0. Its training pipeline mixes 50% of eligible clips with ambient noise (5–15 dB SNR) or background speech (15–25 dB SNR), with the goal of improving noise robustness. That gain has not yet been measured: the reported test metrics use the clean official split, and a dedicated noisy test set is still needed.
 
 ### Version progression
 
-Every version is trained with the same residual CNN recipe and evaluated on the same official speaker-disjoint splits, so the columns below are directly comparable. v3.1 and v3.2 are deployment and application releases respectively; neither trains new weights.
+The command metrics use the official speaker-disjoint splits, but not every row represents a newly trained model or an identical evaluation population. v2.1 has a different validation composition; v2.2, v3.1 and v3.2 do not train new weights, as detailed in the notes below.
 
 | Version | Key change | Params | Val Acc | Test Acc (35 cmd) | Test Macro F1 | Rejection recall | Overall | Δ Test | Model Card |
 | :-- | :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-- |
@@ -67,7 +67,7 @@ Every version is trained with the same residual CNN recipe and evaluated on the 
 | **v3.0** | Memory-optimized pipeline + conditional GPU augmentation | 1,217,349 | 96.36% | **95.8655%** | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | **+1.7174** | [v3.0 card](reports/model_v3.0/README.md) |
 | **v3.1** | Deployment release: static INT8 (QDQ) quantization | 1,217,349 | 96.36% | 95.8655%\* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.1 card](reports/model_v3.1/README.md) |
 | **v3.2** | Application release: unified Gradio UI and real-time spotter | 1,217,349 | 96.36% | 95.8655%\* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.2 card](reports/model_v3.2/README.md) |
-| **v4.0** | Robustness release: SNR-controlled noise mixing | 1,217,349 | 96.41% | 95.6111% | 0.9533 | `_silence_` 100.00%<br>`_unknown_` 97.64% | 95.9025% | **−0.2544** | [v4.0 card](reports/model_v4.0/README.md) |
+| **v4.0** | Noise-mixing training release | 1,217,349 | 96.41% | 95.6111% | 0.9533 | `_silence_` 100.00%<br>`_unknown_` 97.64% | 95.9025% | **−0.2544** | [v4.0 card](reports/model_v4.0/README.md) |
 
 † The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
 
@@ -80,10 +80,10 @@ Every version is trained with the same residual CNN recipe and evaluated on the 
 ### What the progression shows
 
 - **A single-channel front-end limits the model.** Moving to a 3-channel Log-Mel + Δ + Δ² representation in v2.0 establishes the multi-channel front-end used in all subsequent versions.
-- **Rejection capability trades slightly with command accuracy.** Introducing `_silence_` and `_unknown_` in v2.1 costs ~0.64 points on the 35-command task but enables robust real-world deployment.
-- **Pipeline efficiency drives the v3.0 accuracy gains.** v3.0 moves the audio cache to `int16` and the feature extraction/augmentation to the GPU. This memory-optimized pipeline allows a longer 30-epoch training schedule, lifting the 35-command Top-1 accuracy to **95.8655%** (+1.72 points) without changing the network architecture.
+- **v2.1 adds explicit rejection classes.** Introducing `_silence_` and `_unknown_` coincides with a ~0.64-point decrease on the 35-command task and adds explicit classes for silence and OOV speech.
+- **v3.0 combines pipeline and training changes.** It moves the audio cache to `int16` and feature extraction/augmentation to the GPU, and uses a 30-epoch schedule. Its 35-command Top-1 accuracy is **95.8655%** (+1.72 points over v2.2) without changing the network architecture; this comparison does not isolate the contribution of any individual change.
 - **v3.1 and v3.2 are packaging releases.** v3.1 focuses on artifact size and web compatibility via INT8 static quantization, and v3.2 adds the unified real-time interface. Neither changes the predictive metrics.
-- **v4.0 is the first release to train for robustness rather than clean accuracy.** SNR-controlled noise mixing teaches the model to recognize commands under background speech and ambient noise. The cost is a small clean-audio regression (−0.26 pt on the 35-command test split); the benefit is a model that is trained on realistic conditions rather than clean studio recordings. See the v4.0 model card for the full trade-off analysis.
+- **v4.0 is the first release to target noise robustness during training.** SNR-controlled noise mixing exposes eligible command clips to background speech and ambient noise. The clean 35-command test score is 0.26 points lower than v3.0, but the robustness gain has not yet been measured on a dedicated noisy test set. See the v4.0 model card for the full caveats.
 
 ---
 
@@ -100,7 +100,7 @@ Each version has a model card documenting its configuration, full classification
 | v3.0 | [model_v3.0](reports/model_v3.0/README.md) | Memory-optimized pipeline and GPU augmentations |
 | v3.1 | [model_v3.1](reports/model_v3.1/README.md) | INT8 static quantization fidelity |
 | v3.2 | [model_v3.2](reports/model_v3.2/README.md) | Real-time application layer, latency and thread safety |
-| v4.0 | [model_v4.0](reports/model_v4.0/README.md) | **Current Release**: SNR-controlled noise mixing for background-speech robustness |
+| v4.0 | [model_v4.0](reports/model_v4.0/README.md) | **Current Release**: SNR-controlled noise mixing; noisy-condition evaluation pending |
 
 ---
 
@@ -247,11 +247,11 @@ The first training run caches the raw audio as `int16` in RAM and builds the 3-c
 
 ### 3. SNR-controlled noise mixing (v4.0)
 
-Half of the training clips are mixed with a noise source at a controlled signal-to-noise ratio, on the GPU, after the feature front-end. The `_silence_` class is never mixed, so the reject boundary stays sharp.
+Half of the eligible training clips are mixed with a noise source at a controlled signal-to-noise ratio on the GPU, at the waveform stage before feature extraction. The `_silence_` class is never mixed, preserving its original background-noise examples.
 
 | Parameter | Value | Effect |
 | :-- | :-- | :-- |
-| Noise mixing probability | 50% per training clip | Half the batch stays clean, half is mixed |
+| Noise mixing probability | 50% of eligible training clips | Eligible clips are sampled for mixing at this rate |
 | Ambient noise SNR | 5–15 dB | `_background_noise_` recordings, command dominates |
 | Speech noise SNR | 15–25 dB | LibriSpeech clips, kept quiet so the command label is never corrupted |
 | Speech noise source share | 50% LibriSpeech, 50% ambient | Balanced exposure to both interference types |
@@ -309,7 +309,7 @@ Both tabs share the same model, calibration and inference runtime. Inference cal
 
 The model explicitly learns to reject via two non-command classes: `_silence_` (background noise) and `_unknown_` (LibriSpeech OOV speech).
 
-v4.0 re-fits the calibration on its new weights: **`T = 1.252585`** and **`tau* = 0.92`**, both selected on the validation split with a 90% coverage floor. The fitted temperature is slightly lower than v3.0's (`T = 1.3116`), which means the v4.0 logits were already better calibrated out of the box — a common side effect of training on a harder, noisier distribution.
+v4.0 re-fits the calibration on its new weights: **`T = 1.252585`** is fitted on the validation split, and **`tau* = 0.92`** is selected there by `min_cost` subject to a 90% coverage floor. The temperature is lower than v3.0's (`T = 1.3116`); that difference alone does not establish that the v4.0 logits are better calibrated or explain why the fitted temperature changed.
 
 A clip is answered only when its calibrated top-1 probability reaches `tau`; otherwise, it is served as `_unknown_`. On the v4.0 weights, this buys precision (**99.57% retained accuracy** on answered clips) at the cost of coverage (**88.95%** of clips answered).
 
@@ -333,7 +333,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 **Known gaps and limitations:**
 
 - **No dedicated noisy test set yet:** v4.0 is trained on mixed audio, but its published metrics are still measured on the clean official test split. A dedicated noisy evaluation split (commands mixed at held-out SNR levels) is needed to quantify the robustness gain, and is planned as the next step.
-- **Small clean-audio regression:** v4.0 scores 95.61% on the clean 35-command test split, versus 95.87% for v3.0. This is the intended trade-off for noise robustness, not a bug.
+- **Clean-audio score difference:** v4.0 scores 95.61% on the clean 35-command test split, versus 95.87% for v3.0. This is an observed difference; without a dedicated noisy test set, it cannot yet be interpreted as a measured trade-off for improved robustness.
 - **Overlapping speech is mitigated, not solved:** the model has seen background speech at 15–25 dB SNR during training, but two talkers at similar levels, or command-command mixtures, are still not explicitly trained. The cocktail party problem remains an active limitation.
 - **INT8 CPU latency:** v3.1 reduces artifact size for web compatibility, but the INT8 CPU provider is currently ~1.68x slower than the float32 CPU provider.
 - **Single-run metrics:** the reported v4.0 accuracy is the result of a single training run.
@@ -344,7 +344,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 
 ## Roadmap
 
-- [x] Address overlapping speech with mixed-speech training data (v4.0 noise mixing).
+- [x] Add mixed-speech and ambient-noise augmentation to training (v4.0).
 - [ ] Build a dedicated noisy test set to quantify the robustness gain across SNR levels.
 - [ ] Benchmark WebAssembly (WASM) inference latency using the INT8 graph.
 - [ ] Implement an ONNX graph optimization pass to fuse QDQ nodes and recover CPU latency.

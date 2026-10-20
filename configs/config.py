@@ -41,12 +41,6 @@ PITCH_SHIFT_N_FFT = 512
 PITCH_SHIFT_BINS_PER_OCTAVE = 12
 TIME_SHIFT_PROB = 0.5
 TIME_SHIFT_RATIO = 0.10                   # max shift, as a share of the 1.0 s clip
-
-# SNR-based noise mixing (v4.0). Noise is mixed into the training waveforms on
-# the accelerator, never into a cached int16 clip. '_silence_' is excluded, it
-# has to stay pure background noise for the OOD boundary, and LibriSpeech is
-# mixed at a much higher SNR than ambient noise so a command always dominates
-# the background speech and its label cannot be corrupted.
 NOISE_MIX_PROB = 0.5                      # P(noise mixing) per training clip
 SNR_AMBIENT_MIN_DB = 5.0                  # '_background_noise_' SNR range
 SNR_AMBIENT_MAX_DB = 15.0

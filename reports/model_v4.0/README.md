@@ -2,9 +2,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v4.0.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/PyTorch-Supported-EE4C2C?style=for-the-badge" alt="PyTorch">
   <img src="https://img.shields.io/badge/INT8%20ONNX-SUPPORTED-green?style=for-the-badge" alt="INT8 ONNX">
-  <img src="https://img.shields.io/badge/FP32%20ONNX-SUPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
+  <img src="https://img.shields.io/badge/FP32%20ONNX-SUPPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
 
@@ -16,7 +16,7 @@
 - **Architecture**: Residual CNN (3 residual stages) with a three-channel Log-Mel front-end. **1,217,349 parameters** (≈4.87 MB in float32).
 - **Weights**: trained from scratch for **30 epochs** on the official speaker-disjoint splits with SNR-controlled noise mixing.
 - **Front-end**: `AudioToThreeChannelMel` (`src/transforms.py`) builds the Log-Mel + Δ + Δ² tensor **on the accelerator**, on the fly, from the raw `int16` waveforms.
-- **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions, trained to be robust to overlapping speech and background noise.
+- **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions. Training includes controlled ambient-noise and background-speech mixing to target noise robustness; the gain has not yet been measured on a dedicated noisy test set.
 - **Target Classes (37)**: `_silence_`, `_unknown_`, and the 35 command words `backward`, `bed`, `bird`, `cat`, `dog`, `down`, `eight`, `five`, `follow`, `forward`, `four`, `go`, `happy`, `house`, `learn`, `left`, `marvin`, `nine`, `no`, `off`, `on`, `one`, `right`, `seven`, `sheila`, `six`, `stop`, `three`, `tree`, `two`, `up`, `visual`, `wow`, `yes`, `zero`.
 - **Artifacts**: the v4.0 release provides `CommandSense_v4.0.pth` (trained weights), `CommandSense_v4.0.onnx` (exported for ONNX Runtime, with `T` and `tau` in its `metadata_props`) and `CommandSense_calibration_v4.0.json` (the fitted calibration, kept in `configs/calibration/` because it is versioned configuration rather than a weight).
 - **Scope**: this card documents the v4.0 weights and the calibrated deployment layer fitted on top of them — the SNR-controlled noise mixing, the `int16` RAM cache, the GPU-side feature extraction, the GPU-native conditional augmentation and the 30-epoch training schedule that produce them, and the temperature `T` and threshold `tau` that serve them. It reports v4.0 in isolation and makes no claim about any other release.
@@ -25,11 +25,11 @@
 
 ## ★ Technical Innovations
 
-v4.0 keeps the residual network and adds **SNR-controlled noise mixing** to the training pipeline. The model learns to recognize commands even when background speech or ambient noise is present.
+v4.0 keeps the residual network and adds **SNR-controlled noise mixing** to the training pipeline. This exposes eligible command clips to ambient noise and background speech; improved performance in those conditions is the training objective, not yet a measured result.
 
 | Mechanism | Implementation | Effect |
 | :-- | :-- | :-- |
-| **SNR-controlled noise mixing** | 50% of training clips are mixed with noise sources at controlled signal-to-noise ratios. Ambient noise (`_background_noise_`) is mixed at 5–15 dB SNR, LibriSpeech speech at 15–25 dB SNR. Mixing happens on the GPU after feature extraction, never touches the cached int16 clips. | The model learns to extract command features from noisy environments. LibriSpeech is mixed at higher SNR so the command always dominates and its label cannot be corrupted. |
+| **SNR-controlled noise mixing** | 50% of eligible training clips are mixed with noise sources at controlled signal-to-noise ratios. Ambient noise (`_background_noise_`) is mixed at 5–15 dB SNR, LibriSpeech speech at 15–25 dB SNR. Mixing happens on the GPU at the waveform stage, before feature extraction, and never touches the cached int16 clips. | Exposes the model to command audio with ambient noise and background speech. The higher SNR for LibriSpeech is intended to keep the command dominant. Robustness improvement has not yet been measured on a dedicated noisy test set. |
 | **`_silence_` exclusion** | `_silence_` clips are **never** mixed with additional noise. They remain pure background noise. | The reject boundary stays sharp. `_silence_` teaches the model what "no command present" sounds like, and adding noise would blur that boundary. |
 | **Noise banks in RAM** | 256 ambient noise clips and 512 LibriSpeech clips are cached as int16 in RAM and promoted to GPU buffers once before training. | Mixing is fully GPU-resident, no disk I/O during training, no CPU overhead. |
 | **`int16` RAM cache** | `src/dataset.py` caches the raw waveform as `torch.int16` — 16,000 samples × 2 bytes ≈ 32 KB per clip — instead of pre-computed float32 spectrograms. | The resident dataset is ≈75% smaller, so the corpus fits in RAM alongside the model and the batches. |
@@ -55,7 +55,7 @@ v4.0 is trained from scratch for **30 epochs** on the official speaker-disjoint 
 | Seed | `42` (global, set by `set_seed`) |
 | Mixed precision | AMP (`torch.amp.autocast` + `GradScaler`) |
 | Hardware | 1× NVIDIA T4, ≈25–30 s per epoch |
-| Noise mixing probability | 50% per training clip |
+| Noise mixing probability | 50% of eligible training clips |
 | Ambient noise SNR | 5–15 dB |
 | Speech noise SNR | 15–25 dB |
 | Speech noise source share | 50% LibriSpeech, 50% ambient |
@@ -70,7 +70,7 @@ v4.0 is trained from scratch for **30 epochs** on the official speaker-disjoint 
 | 25 | 0.2070 | 93.84% | 0.1637 | 95.97% |
 | 30 | 0.1909 | 94.21% | 0.1599 | 96.14% |
 
-The best checkpoint of the run is the last one: validation accuracy peaks at **96.4204%** on epoch 26 (96.1381% on epoch 30), and validation loss is lowest on epoch 26 (0.1339). The curve is still improving slowly at epoch 30 — the last ten epochs buy ≈0.31 points of validation accuracy — so the 30-epoch budget is mildly under-trained rather than over-trained, and the train/val gap stays small (94.21% vs 96.14% for accuracy, 0.191 vs 0.160 for loss).
+The highest validation accuracy in the recorded history is **96.4204%** at epoch 26; validation loss is also lowest on epoch 26 (0.1339). The epoch-30 validation accuracy is 96.1381%. `train.py` saves the checkpoint when validation accuracy improves, so the best-accuracy checkpoint is from epoch 26, not epoch 30. Validation accuracy fluctuates after epoch 20, so these results alone do not establish that the 30-epoch schedule is under- or over-trained.
 
 **Note on the two validation numbers.** The history JSON records 96.4204% (best epoch, training-time validation loader) while the calibration report measures **96.4113%** on the same 10,979-clip validation split. The two passes differ because the evaluation loader builds its inputs through the dedicated eval path in `src/transforms.py` and re-draws the synthetic `_silence_` / `_unknown_` clips at load time. The headline, **96.41%**, is the calibration report figure.
 
@@ -85,13 +85,13 @@ All numbers below are on the official speaker-disjoint splits, with **raw argmax
 | Overall accuracy (37 classes) | testing | 12,105 | **95.9025%** |
 | Top-1 on the 35 commands | testing | 11,005 | **95.6111%** (10,522) |
 | Top-1 (37 classes) | validation | 10,979 | 96.4113% |
-| Macro F1, 35 command classes | testing | 11,005 | **0.9527** |
+| Macro F1, 35 command classes | testing | 11,005 | **0.9533** |
 | Macro recall, 35 command classes | testing | 11,005 | 0.9511 |
 | Macro F1, 37 classes | testing | 12,105 | 0.9547 |
 | Recall `_silence_` | testing | 550 | **100.0000%** (550) |
 | Recall `_unknown_` | testing | 550 | **97.6364%** (537) |
 
-The per-class report in `report_v4.0.txt` shows the residual error is concentrated in a handful of commands rather than spread evenly: `six` (F1 0.9724), `stop` (0.9817) and `yes` (0.9832) are essentially solved, while `forward` (0.8767), `follow` (0.9046) and `tree` (0.9130) are the weakest three. `forward` and `tree` are recall-limited (0.8258 and 0.8705): the model misses those words more often than it over-predicts them, which is the expected cost of a rejection-heavy training set.
+The per-class report in `report_v4.0.txt` shows the residual error is concentrated in a handful of commands rather than spread evenly: `six` (F1 0.9724), `stop` (0.9817) and `yes` (0.9832) are the highest-scoring three, while `forward` (0.8767), `follow` (0.9046) and `tree` (0.9130) are the lowest-scoring three. `forward` and `tree` are recall-limited (0.8258 and 0.8705): the model misses those words more often than it over-predicts them.
 
 **Comparison with v3.0:**
 - Top-1 on 35 commands: **95.61%** (v4.0) vs 95.87% (v3.0) — a **0.26 pt decrease**
@@ -99,7 +99,7 @@ The per-class report in `report_v4.0.txt` shows the residual error is concentrat
 - `_unknown_` recall: **97.64%** (v4.0) vs 98.55% (v3.0) — a **0.91 pt decrease**
 - Validation accuracy: **96.41%** (v4.0) vs 96.36% (v3.0) — a **0.05 pt increase**
 
-The slight decrease in command accuracy and `_unknown_` recall is the expected cost of training with noise mixing: the model trades a small amount of clean-audio performance for robustness to noisy conditions. The validation accuracy improvement suggests the model generalizes better despite the harder training objective.
+The clean-test command accuracy and `_unknown_` recall are lower than the corresponding v3.0 figures, while validation accuracy is slightly higher. These are observed cross-version differences; without a dedicated noisy test set, they do not establish that noise mixing improved robustness or caused the clean-test changes.
 
 Two caveats on reading this table:
 
@@ -129,13 +129,13 @@ p_i = exp(z_i / T) / Σ_j exp(z_j / T)
 |  |  |  | ECE | 0.008544 | **0.003833** | **−55.1%** |
 |  |  |  | MCE | 0.189815 | 0.089088 | −53.1% |
 
-**`T = 1.2526` is a mild correction, and that is the interesting part.** Before any fitting, the raw logits already score `ECE = 0.0085` on the out-of-sample split — a small miscalibration to begin with — so the fitted scalar stays close to `1` and has limited head-room to exploit. `T > 1` still **softens** the distribution, which is the direction an over-confident network needs, so the reported confidence moves closer to the empirical accuracy while not a single prediction changes.
+**`T = 1.2526` is a mild correction.** Before fitting, the raw logits score `ECE = 0.0085` on the out-of-sample split. The fitted value is greater than `1`, which softens the probability distribution; the reported test ECE also decreases, while the top-1 predictions remain unchanged.
 
 ### - Reliability Diagram
 
-Before calibration the reliability curve already sits close to the diagonal, and after dividing the logits by `T = 1.2526` the residual gap narrows further, with the maximum calibration error falling from 0.190 to 0.089 on the out-of-sample split. The test ECE falls by **55.1%** even though `T` was fitted on a different split: with ≈11 k clips and one free parameter there is essentially nothing to overfit, which is why the out-of-sample improvement tracks the in-sample one so closely.
+Before calibration the reliability curve already sits close to the diagonal, and after dividing the logits by `T = 1.2526` the reported residual gap narrows, with the maximum calibration error falling from 0.190 to 0.089 on the out-of-sample split. The test ECE falls by **55.1%** in this evaluation; this single run and split do not establish that the same improvement will hold for other data or recording conditions.
 
-The practical consequence is modest but real: at 90% confidence the model is now right about 90% of the time, so the calibrated number can be shown to a user as-is, and the same number is what the confidence threshold operates on.
+The practical consequence is that the calibrated probability is the confidence value used by the thresholding rule. Calibration is measured on these evaluation splits and should not be assumed to transfer unchanged to other recording conditions.
 
 ---
 
@@ -148,7 +148,7 @@ A clip is answered only when its calibrated top-1 probability reaches `tau`; oth
     _unknown_     otherwise
 ```
 
-`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the coverage floor `THRESHOLD_MIN_COVERAGE = 90%`. The selected value is **`tau* = 0.92`** — a deliberately strict operating point: the model is accurate and well calibrated, so a high bar can be demanded before an answer is served.
+`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the validation coverage floor `THRESHOLD_MIN_COVERAGE = 90%`. The selected value is **`tau* = 0.92`**. On the separate test split, this threshold gives 88.95% coverage; the test coverage is below 90%, which reflects the difference between the validation and test distributions and does not determine the validation-selected threshold.
 
 | Metric (testing split, 12,105 clips) | Value |
 | :-- | --: |
@@ -188,11 +188,11 @@ Every row is measured on the testing split with the calibrated probabilities, so
 | 0.90 | 89.90% | 99.48% | 6.74% | 11.49% |
 | **0.92** | **88.95%** | **99.57%** | **7.65%** | **9.27%** ← `tau*` |
 
-Below `tau = 0.70` the threshold removes very few errors: coverage stays above 94% but the FAR is still above 30%, so most of the remaining mistakes are served anyway. The useful range is `0.80–0.92`, where the FAR collapses from 21.37% to 9.27% for ≈3.6 points of coverage (92.58% → 88.95%). The `0.92` row is the validation-selected operating point and sits just below the 90% coverage floor, which is exactly why `min_cost` lands on `0.92`.
+Below `tau = 0.70` the threshold removes very few errors: test coverage stays above 94% but the FAR is still above 30%, so most of the remaining mistakes are served anyway. The useful range is `0.80–0.92`, where the test FAR falls from 21.37% to 9.27% as coverage decreases from 92.58% to 88.95%. The `0.92` row is the validation-selected operating point; its test-split coverage is not the coverage value used by `min_cost`.
 
 ### - Coverage vs Accuracy
 
-Below `tau ≈ 0.5` almost nothing is rejected (coverage 97–100%) while most of the remaining errors are still served (FAR 59–100%); above `tau ≈ 0.9` the threshold starts discarding correct answers (FRR 7.65%) faster than it removes errors. The useful range is narrow — retained accuracy only moves from 99.05% to 99.57% between `tau = 0.80` and `tau = 0.92` — which is the flip side of the better calibrated base: there is simply less error left for a threshold to remove.
+Below `tau ≈ 0.5` almost nothing is rejected (coverage 97–100%) while most of the remaining errors are still served (FAR 59–100%); above `tau ≈ 0.9` the threshold starts discarding correct answers (FRR 7.65%) faster than it removes errors. The useful range is narrow — retained accuracy only moves from 99.05% to 99.57% between `tau = 0.80` and `tau = 0.92` — illustrating the coverage-versus-error trade-off at these tested thresholds.
 
 ### - Interaction with the Learned Rejection Classes
 
@@ -248,7 +248,7 @@ python evaluate.py   # fits T and tau -> configs/calibration/ + this folder
 ## ★ Caveats
 
 - **The mechanisms act as a bundle.** The noise mixing strategy, the RAM representation, the front-end placement, the augmentation strategy, the provisioning fallback and the epoch budget are all part of one release. The published metrics are the outcome of the combination; this card does not attribute them to any single mechanism.
-- **Noise mixing trades clean-audio accuracy for robustness.** The 35-command Top-1 accuracy is 95.61% (vs 95.87% in v3.0), and `_unknown_` recall is 97.64% (vs 98.55% in v3.0). The model is slightly less accurate on clean audio but is trained to be robust to overlapping speech and background noise. This is the intended trade-off.
+- **Noise robustness remains unmeasured.** On the clean test split, the 35-command Top-1 accuracy is 95.61% (vs 95.87% in v3.0), and `_unknown_` recall is 97.64% (vs 98.55% in v3.0). These are observed cross-version differences; without a dedicated noisy test set, they do not establish either a robustness gain or that noise mixing caused the clean-split differences.
 - **The improvement is a training-data improvement, not a capacity improvement.** The architecture is a plain 1,217,349-parameter residual CNN: no layer was added, removed or resized. What changed is how the data reaches the model during training.
 - **The rejection clips are drawn at load time.** The 10,979-clip validation split and the 12,105-clip testing split (11,005 commands + 1,100 rejection clips) each contain 1,100 synthetic `_silence_` / `_unknown_` clips that `src/dataset.py` slices out of the held-out recordings rather than storing on disk. The two rejection-class recalls are therefore samples rather than constants: re-running the evaluation with a different seed moves those cells, while the 35 command columns do not move.
 - **The `Val Acc` column vs the calibration report.** The training history records 96.4204% at its best epoch; the calibration report measures 96.4113% on the same split through the evaluation path. The headline **96.41%** follows the report.

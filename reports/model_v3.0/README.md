@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v3.0.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/PyTorch-Supported-EE4C2C?style=for-the-badge" alt="PyTorch">
   <img src="https://img.shields.io/badge/ONNX-Supported-005ced?style=for-the-badge" alt="ONNX Runtime">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
@@ -62,7 +62,7 @@ v3.0 is trained from scratch for **30 epochs** on the official speaker-disjoint 
 | 20 | — | — | — | 95.97 % |
 | 30 | 0.111208 | 96.53 % | 0.149190 | 96.12 % |
 
-The best checkpoint of the run is the last one: validation accuracy peaks at **96.3567 %** on epoch 29 (96.1199 % on epoch 30), and validation loss is lowest on the same epoch (0.141437). The curve is still improving slowly at epoch 30 — the last ten epochs buy ≈0.38 points of validation accuracy — so the 30-epoch budget is mildly under-trained rather than over-trained, and the train/val gap stays small (96.53 % vs 96.12 % for accuracy, 0.111 vs 0.149 for loss).
+The highest validation accuracy in the recorded history is **96.3567 %** on epoch 29 (96.1199 % on epoch 30); validation loss is also lowest on epoch 29 (0.141437). `train.py` saves the checkpoint when validation accuracy improves, so the best-accuracy checkpoint is from epoch 29, not epoch 30. Validation accuracy fluctuates during the final epochs, so these results alone do not establish that the 30-epoch schedule is under- or over-trained.
 
 **Note on the two validation numbers.** The history JSON records 96.3567 % (best epoch, training-time validation loader) while the calibration report measures **96.3749 %** on the same 10,979-clip validation split. The two passes differ because the evaluation loader builds its inputs through the dedicated eval path in `src/transforms.py` and re-draws the synthetic `_silence_` / `_unknown_` clips at load time. The headline, **96.36 %**, is the calibration report figure.
 
@@ -85,7 +85,7 @@ All numbers below are on the official speaker-disjoint splits, with **raw argmax
 
 ![Confusion Matrix](confusion_matrix_v3.0.png)
 
-The per-class report in [`report_v3.0.txt`](report_v3.0.txt) shows the residual error is concentrated in a handful of commands rather than spread evenly: `six` (F1 0.9873), `stop` (0.9854) and `yes` (0.9856) are essentially solved, while `tree` (0.8855), `learn` (0.8896) and `bed` (0.9059) are the weakest three. `bed` and `tree` are recall-limited (0.8599 and 0.9016): the model misses those words more often than it over-predicts them, which is the expected cost of a rejection-heavy training set.
+The per-class report in [`report_v3.0.txt`](report_v3.0.txt) shows the residual error is concentrated in a handful of commands rather than spread evenly: `six` (F1 0.9873), `stop` (0.9854) and `yes` (0.9856) are the highest-scoring three, while `tree` (0.8855), `learn` (0.8896) and `bed` (0.9059) are the lowest-scoring three. `bed` and `tree` are recall-limited (0.8599 and 0.9016): the model misses those words more often than it over-predicts them.
 
 Two caveats on reading this table:
 
@@ -133,7 +133,7 @@ A clip is answered only when its calibrated top-1 probability reaches `tau`; oth
 
 $$\hat{y} = \begin{cases} \arg\max_i p_i, & \max_i p_i \ge \tau \\ \texttt{\_unknown\_}, & \text{otherwise} \end{cases}$$
 
-`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the coverage floor `THRESHOLD_MIN_COVERAGE = 90 %`. The selected value is **`tau* = 0.89`** — a deliberately strict operating point: the model is accurate and well calibrated, so a high bar can be demanded before an answer is served.
+`tau` is swept over `[0, 1]` in steps of `0.01` on the validation split, and the selection criterion is `min_cost`, which minimises `FRR + FAR` subject to the validation coverage floor `THRESHOLD_MIN_COVERAGE = 90 %`. The selected value is **`tau* = 0.89`**. On the separate test split, this threshold gives 89.76% coverage; the test coverage is below 90%, which does not determine the validation-selected threshold.
 
 | Metric (testing split, 12,105 clips) | Value |
 | :--- | ---: |
@@ -173,13 +173,13 @@ Every row is measured on the testing split with the calibrated probabilities, so
 | 0.90 | 89.26 % | **99.55 %** | 7.61 % | **10.58 %** |
 | **0.89** | **89.76 %** | **99.48 %** | **7.16 %** | **12.31 %** ← `tau*` |
 
-Below `tau = 0.70` the threshold removes very few errors: coverage stays above 95 % but the FAR is still above 30 %, so most of the remaining mistakes are served anyway. The useful range is `0.80–0.90`, where the FAR collapses from 21.60 % to 10.58 % for ≈3.9 points of coverage (93.14 % → 89.26 %). The `0.90` row is very slightly more accurate on retained accuracy (99.55 %) but sits just below the 90 % coverage floor, which is exactly why `min_cost` lands on `0.89`.
+Below `tau = 0.70` the threshold removes very few errors: test coverage stays above 95 % but the FAR is still above 30 %, so most of the remaining mistakes are served anyway. The useful range is `0.80–0.90`, where the test FAR falls from 21.60 % to 10.58 % as coverage decreases from 93.14 % to 89.26 %. The `0.89` row is the validation-selected operating point; its test-split coverage is not the coverage value used by `min_cost`.
 
 ### - Coverage vs Accuracy
 
 ![Coverage vs Accuracy](coverage_vs_accuracy_v3.0.png)
 
-Below `tau ≈ 0.5` almost nothing is rejected (coverage 98–100 %) while most of the remaining errors are still served (FAR 64–100 %); above `tau ≈ 0.9` the threshold starts discarding correct answers (FRR 7.61 %) faster than it removes errors. The useful range is narrow — retained accuracy only moves from 99.11 % to 99.55 % between `tau = 0.80` and `tau = 0.90` — which is the flip side of the better calibrated base: there is simply less error left for a threshold to remove.
+Below `tau ≈ 0.5` almost nothing is rejected (coverage 98–100 %) while most of the remaining errors are still served (FAR 64–100 %); above `tau ≈ 0.9` the threshold starts discarding correct answers (FRR 7.61 %) faster than it removes errors. The useful range is narrow — retained accuracy only moves from 99.11 % to 99.55 % between `tau = 0.80` and `tau = 0.90` — illustrating the coverage-versus-error trade-off at these tested thresholds.
 
 ### - Interaction with the Learned Rejection Classes
 
@@ -240,4 +240,3 @@ python evaluate.py   # fits T and tau -> configs/calibration/ + this folder
 * **The `Val Acc` column vs the calibration report.** The training history records 96.3567 % at its best epoch; the calibration report measures 96.3749 % on the same split through the evaluation path. The headline **96.36 %** follows the report.
 * **The threshold trades coverage for precision, and it loses on net yield.** At `tau* = 0.89` the answers served are 99.48 % correct, but the end-to-end yield of *answered and correct* clips (89.29 %) is below the 96.18 % the threshold-free model scores on every clip. Choose `tau` from the sweep table, not from the headline accuracy.
 * **This card describes v3.0 only.** It is written to be read on its own and makes no claim about any other release: no other version appears in it, and no metric is stated as a delta against one. Comparisons across versions live in the repository's root `README.md`, where every version sits in a single table.
-
