@@ -1,0 +1,84 @@
+====================================================================
+          COMMANDSENSE - NOISE ROBUSTNESS REPORT
+====================================================================
+
+Model version    : v4.0 (CommandSense)
+Checkpoint       : C:\Users\Administrator\Documents\Models\spoken-command-recognition\checkpoints\model_v4.0\CommandSense_v4.0.pth
+Calibration      : C:\Users\Administrator\Documents\Models\spoken-command-recognition\configs\calibration\CommandSense_calibration_v4.0.json
+Evaluation split : 'testing' (official clean, speaker-disjoint)
+Command clips    : 11005 of 11005 scored, 35 command classes
+Split size       : 12105 clips, incl. 1100 rejection-class clips
+Served op point  : T=1.252585, tau=0.9200
+Device           : cpu
+Mixing seed      : 42
+Runtime          : 442.4 s
+Generated (UTC)  : 2026-10-20 21:56:55
+
+====================================================================
+ HELD-OUT NOISE BANK - disjoint from the training noise sources
+====================================================================
+Ambient noise    : 121 non-overlapping chunks of 1.0 s (full yield of the 2 held-out recordings)
+  source         : running_tap.wav, white_noise.wav
+  excluded       : doing_the_dishes.wav, dude_miaowing.wav, exercise_bike.wav, pink_noise.wav (training)
+Speech noise     : 512 chunks of 1.0 s (dev-clean: 512)
+  excluded       : train-clean-100 (training)
+  absent         : test-clean (provision with --download_speech_noise)
+Mix composition  : 50% ambient / 50% speech, drawn per clip
+Bank size        : 633 chunks
+
+====================================================================
+ ROBUSTNESS
+====================================================================
+
+| SNR Level (dB) | Condition | Top-1 Accuracy | Rejection Rate |
+| -------------- | --------- | -------------- | -------------- |
+| 5              | Noisy     | 75.24%         | 41.73%         |
+| 10             | Noisy     | 88.45%         | 28.97%         |
+| 15             | Noisy     | 92.69%         | 19.97%         |
+| 20             | Noisy     | 93.94%         | 15.86%         |
+| -              | Clean     | 95.61%         | 11.63%         |
+
+Clean anchor     : 95.61% (10522/11005)
+Mean noisy Top-1 : 87.58%
+Worst condition  : 5 dB -> 75.24%
+Clean -> worst   : -20.37 pp
+
+Operating point detail (temperature-scaled, tau applied)
+
+| SNR Level (dB) | Condition | Accepted Accuracy | Coverage | Correct Yield | Mean Confidence |
+| -------------- | --------- | ----------------- | -------- | ------------- | --------------- |
+| 5              | Noisy     | 90.32%            | 58.27%   | 52.63%        | 84.15%          |
+| 10             | Noisy     | 98.23%            | 71.03%   | 69.78%        | 89.22%          |
+| 15             | Noisy     | 99.28%            | 80.03%   | 79.45%        | 92.54%          |
+| 20             | Noisy     | 99.42%            | 84.14%   | 83.65%        | 93.97%          |
+| -              | Clean     | 99.57%            | 88.37%   | 87.99%        | 95.54%          |
+
+====================================================================
+ COMPARISON - v4.0 vs v3.0
+====================================================================
+
+| SNR Level (dB) | Condition | v4.0 Top-1 | v3.0 Top-1 | Delta (pp) | v4.0 Reject | v3.0 Reject |
+| -------------- | --------- | ---------- | ---------- | ---------- | ----------- | ----------- |
+| 5              | Noisy     | 75.24%     | 50.96%     | +24.28     | 41.73%      | 29.48%      |
+| 10             | Noisy     | 88.45%     | 63.54%     | +24.91     | 28.97%      | 26.67%      |
+| 15             | Noisy     | 92.69%     | 74.27%     | +18.43     | 19.97%      | 22.08%      |
+| 20             | Noisy     | 93.94%     | 84.10%     | +9.84      | 15.86%      | 19.04%      |
+| -              | Clean     | 95.61%     | 95.87%     | -0.25      | 11.63%      | 9.16%       |
+
+v3.0 operating pt: T=1.311633, tau=0.8900
+Mean noisy delta : +19.36 pp (v4.0 minus v3.0, Top-1)
+
+NOTES
+--------------------------------------------------------------------
+* Top-1 Accuracy is the raw argmax over every command clip and is
+  threshold-independent, i.e. the same figure as 'Top-1 Accuracy
+  (35 Commands)' in report_v4.0.txt.
+* Rejection Rate is the share of command clips whose temperature-scaled
+  top-1 confidence falls below tau and is therefore served as '_unknown_'.
+* Accepted Accuracy covers only answered clips; Correct Yield is answered
+  and correct over all clips, the fraction a user sees handled correctly.
+* Every row re-uses the same clean clips and every model receives the same
+  mixture, so a model-to-model delta is a property of the weights.
+* The bank never reads SpeechCommandsDataset.noise_bank: ambient noise comes
+  from the held-out _background_noise_ recordings, speech noise from
+  held-out LibriSpeech splits, so no evaluated mixture was ever trained on.

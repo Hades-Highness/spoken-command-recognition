@@ -1,0 +1,19 @@
+{
+    "model_name": "CommandSense",
+    "model_version": "v4.0",
+    "created_utc": "2026-10-18T17:08:15Z",
+    "temperature": 1.252585,
+    "confidence_threshold": 0.92,
+    "reject_label": "_unknown_",
+    "n_bins": 15,
+    "ece_before": 0.007262,
+    "ece_after": 0.003696,
+    "nll_before": 0.133495,
+    "nll_after": 0.129083,
+    "nll_before_train": null,
+    "threshold_criterion": "min_cost",
+    "calibration_split": "validation (10979 samples): activation ranges and T/tau; measured on testing (12105 samples)",
+    "calibration_samples": 10979,
+    "source_checkpoint": "C:\\Users\\Administrator\\Documents\\Models\\spoken-command-recognition\\checkpoints\\model_v4.0\\CommandSense_v4.0.pth",
+    "notes": "INT8 build of the v4.0 float32 graph, so ECE/NLL above are the quantized graph's on 'validation'. T/tau reused from v4.0; moved the coverage of the held-out 'testing' split by 0.07 pt (0.5 pt tolerance). Activation ranges from 500 'validation' clips; 'testing' fed nothing."
+}

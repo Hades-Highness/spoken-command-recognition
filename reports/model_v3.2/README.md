@@ -2,11 +2,12 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Model%20Version-v3.2.0-7c3aed?style=for-the-badge" alt="Model Version">
-  <img src="https://img.shields.io/badge/PyTorch-Suported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/PyTorch-Supported-EE4C2C?style=for-the-badge" alt="PyTorch">
   <img src="https://img.shields.io/badge/INT8%20ONNX-SUPPORTED-green?style=for-the-badge" alt="INT8 ONNX">
-  <img src="https://img.shields.io/badge/FP32%20ONNX-SUPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
+  <img src="https://img.shields.io/badge/FP32%20ONNX-SUPPORTED-005ced?style=for-the-badge" alt="FP32 ONNX">
   <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
 </p>
+
 ---
 
 ## ★ Model Overview

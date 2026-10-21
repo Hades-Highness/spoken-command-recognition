@@ -1,9 +1,15 @@
-"""Raw-audio dataset for the CommandSense v3.0 pipeline.
+"""Raw-audio dataset for the CommandSense v3.0 / v4.0 pipeline.
 
 Clips are standardized to 16 kHz mono, exactly 1.0 s, and cached as
 ``torch.int16``; the 3-channel features are extracted on the GPU by
 ``src/transforms.py``. Dataset provisioning (download and extraction under
 ``./data/``) is centralized here and idempotent.
+
+For v4.0 the training split additionally exposes ``noise_bank``: two small
+``int16`` pools (training-side ``_background_noise_`` chunks and cached
+LibriSpeech ``_unknown_`` clips) that ``AudioToThreeChannelMel`` promotes to
+non-persistent GPU buffers once, before the first batch. Mixing therefore never
+touches the disk and never runs on the CPU, and no other split builds a bank.
 """
 
 import gc
@@ -23,7 +29,15 @@ from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from configs.config import DATA_DIR, NUM_CLASSES, TARGET_SAMPLES  # noqa: E402
+from configs.config import (  # noqa: E402
+    DATA_DIR,
+    NOISE_BANK_AMBIENT_CLIPS,
+    NOISE_BANK_SPEECH_CLIPS,
+    NUM_CLASSES,
+    SAMPLE_RATE,
+    SEED,
+    TARGET_SAMPLES,
+)
 from src.models import AudioFeatureExtractor  # noqa: E402
 from src.utils import load_audio_file, prepare_waveform  # noqa: E402
 
@@ -38,7 +52,9 @@ SPEECH_COMMANDS_ROOT = os.path.join(str(DATA_DIR), "SpeechCommands")
 SPEECH_COMMANDS_DIR = os.path.join(SPEECH_COMMANDS_ROOT, "speech_commands_v0.02")
 LIBRISPEECH_ROOT = os.path.join(str(DATA_DIR), "LibriSpeech")
 
-LIBRISPEECH_SUBSETS = ("dev-clean", "train-clean-100")
+# 'test-clean' is never a training source: it only exists so
+# evaluate_robustness.py can provision held-out speech noise on request.
+LIBRISPEECH_SUBSETS = ("dev-clean", "test-clean", "train-clean-100")
 LIBRISPEECH_SPLIT_BY_SUBSET = {
     "training": "train-clean-100",
     "validation": "dev-clean",
@@ -222,6 +238,76 @@ def list_audio_files(directory: str) -> list:
     )
 
 
+def background_noise_split():
+    """Return ``(train_files, heldout_files)`` from ``_background_noise_``.
+
+    The recordings are disjoint between the training split and the validation /
+    testing splits, so neither the '_silence_' class nor the v4.0 noise mixer can
+    leak held-out background noise into training.
+    """
+    bg_dir = os.path.join(SPEECH_COMMANDS_DIR, "_background_noise_")
+    if not os.path.exists(bg_dir):
+        raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
+
+    bg_files = list_audio_files(bg_dir)
+    if len(bg_files) < 5:
+        raise RuntimeError(
+            f"Expected at least 5 background noise files in {bg_dir}, "
+            f"found {len(bg_files)}."
+        )
+    return bg_files[:4], bg_files[4:]
+
+
+def _mono_16k(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
+    """Resample to 16 kHz and downmix to mono, keeping the full duration."""
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    if sample_rate != SAMPLE_RATE:
+        waveform = torchaudio.transforms.Resample(
+            orig_freq=sample_rate, new_freq=SAMPLE_RATE
+        )(waveform)
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+    return waveform
+
+
+def build_ambient_noise_bank(
+    files, num_clips: int = NOISE_BANK_AMBIENT_CLIPS, seed: int = SEED
+):
+    """Slice background recordings into ``[N, 1, TARGET_SAMPLES]`` int16 clips.
+
+    Runs once while the dataset is built, never inside the training loop. Each
+    recording contributes the same quota of non-overlapping 1.0 s chunks, so a
+    single long file cannot dominate the pool, and every chunk already has the
+    cache layout the front-end expects (int16, mono, 16 kHz, fixed length).
+    """
+    if not files or num_clips <= 0:
+        return None
+
+    per_file = max(1, num_clips // len(files))
+    chunks = []
+    for path in files:
+        waveform, sample_rate = load_audio_file(path)
+        audio = _mono_16k(waveform, sample_rate)
+        taken = 0
+        for start in range(0, audio.shape[1] - TARGET_SAMPLES + 1, TARGET_SAMPLES):
+            chunks.append(quantize_int16(audio[:, start:start + TARGET_SAMPLES]))
+            taken += 1
+            if taken >= per_file:
+                break
+        if len(chunks) >= num_clips:
+            break
+
+    if not chunks:
+        return None
+
+    bank = torch.cat(chunks, dim=0).unsqueeze(1)
+    if bank.shape[0] > num_clips:
+        keep = sorted(random.Random(seed).sample(range(bank.shape[0]), num_clips))
+        bank = bank[keep]
+    return bank.contiguous()
+
+
 class SpeechCommandsDataset(Dataset):
     """Google Speech Commands v0.02 extended to 37 classes (35 + 2 rejection).
 
@@ -273,6 +359,7 @@ class SpeechCommandsDataset(Dataset):
         self.label_to_idx = {label: idx for idx, label in enumerate(self.labels)}
 
         self.extra_samples = []
+        self.unknown_extra_indices = []
         self._generate_extra_samples()
 
         self.num_raw = len(self.raw_dataset)
@@ -293,6 +380,14 @@ class SpeechCommandsDataset(Dataset):
                 self._cache_audio_in_ram()
             else:
                 self._cache_features_in_ram()
+
+        # v4.0 noise pools. Built after the audio cache so the LibriSpeech pool is
+        # a slice of the clips already in RAM, not a second pass over the corpus.
+        # Training-only by construction: validation and test splits stay clean,
+        # which is what makes their metrics comparable with v3.x.
+        self.noise_bank = None
+        if self.return_audio and self.subset == "training":
+            self.noise_bank = self._build_noise_bank()
 
     def _cache_audio_in_ram(self):
         """Preload every clip into a single int16 tensor living in system RAM."""
@@ -340,27 +435,66 @@ class SpeechCommandsDataset(Dataset):
 
         print(f"[+] {len(self.cached_features)} samples loaded into RAM.\n")
 
+    def _build_noise_bank(self):
+        """Preload the v4.0 noise pools as int16 tensors in system RAM.
+
+        Ambient clips are sliced from the training half of ``_background_noise_``
+        (the same split the '_silence_' class draws from, so held-out recordings
+        stay out of training), and the overlapping-speech pool is sampled from the
+        LibriSpeech clips already cached as '_unknown_'. Both are copied once,
+        here; the training loop only gathers from the GPU buffers built from them.
+        """
+        try:
+            train_bg, _ = background_noise_split()
+        except RuntimeError as exc:
+            print(f"[!] Noise mixing disabled: {exc}")
+            return None
+
+        ambient = build_ambient_noise_bank(train_bg)
+        speech = self._sample_unknown_audio(NOISE_BANK_SPEECH_CLIPS)
+        if ambient is None and speech is None:
+            print("[!] Noise mixing disabled: no ambient or speech noise clips.")
+            return None
+
+        ambient_clips = 0 if ambient is None else int(ambient.shape[0])
+        speech_clips = 0 if speech is None else int(speech.shape[0])
+        print(
+            f"[+] Noise bank ready: ambient={ambient_clips} clips, "
+            f"speech={speech_clips} clips (int16, RAM, training split only)"
+        )
+        return {"ambient": ambient, "speech": speech}
+
+    def _sample_unknown_audio(self, num_clips: int):
+        """Random ``[N, 1, TARGET_SAMPLES]`` int16 slice of cached LibriSpeech.
+
+        Selecting before indexing keeps the copy at ``N`` clips instead of
+        materializing every '_unknown_' row as a second tensor.
+        """
+        count = len(self.unknown_extra_indices)
+        if count == 0 or num_clips <= 0:
+            return None
+
+        picked = random.Random(SEED).sample(range(count), min(num_clips, count))
+        if self.audio is not None:
+            rows = torch.tensor(
+                [self.num_raw + self.unknown_extra_indices[i] for i in picked],
+                dtype=torch.long,
+            )
+            return self.audio[rows].clone()
+
+        return torch.stack(
+            [self.extra_samples[self.unknown_extra_indices[i]][0] for i in picked]
+        ).clone()
+
     def _generate_extra_samples(self):
         """Generates _silence_ and _unknown_ samples using real audio sources."""
         num_extra_target = int(len(self.raw_dataset) * 0.05)  # ~5% of split size
 
         # 1. _silence_ samples; the noise sources are split to prevent leakage.
-        bg_dir = os.path.join(SPEECH_COMMANDS_DIR, "_background_noise_")
-        if not os.path.exists(bg_dir):
-            raise RuntimeError(f"[!] Background noise directory not found at '{bg_dir}'.")
-
-        bg_files = list_audio_files(bg_dir)
-
-        if len(bg_files) < 5:
-            raise RuntimeError(
-                f"Expected at least 5 background noise files in {bg_dir}, "
-                f"found {len(bg_files)}."
-            )
-
-        if self.subset == "training":
-            selected_bg = bg_files[:4]
-        else:
-            selected_bg = bg_files[4:]
+        #    The same split feeds the v4.0 ambient pool, so the mixer cannot
+        #    borrow a held-out recording either.
+        train_bg, heldout_bg = background_noise_split()
+        selected_bg = train_bg if self.subset == "training" else heldout_bg
 
         silence_count = 0
         for _ in range(num_extra_target):
@@ -394,6 +528,9 @@ class SpeechCommandsDataset(Dataset):
                 self.extra_samples.append(
                     (waveform_to_int16(waveform, sample_rate), "_unknown_")
                 )
+                # Row of this clip inside ``extra_samples``: the v4.0 speech-noise
+                # pool is sampled from exactly these LibriSpeech rows.
+                self.unknown_extra_indices.append(len(self.extra_samples) - 1)
                 unknown_count += 1
 
         except Exception as e:

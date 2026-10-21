@@ -2,14 +2,15 @@
 
 Raw ``int16`` audio lives in system RAM and every spectral operation runs on the
 accelerator, so the CPU never materializes a spectrogram: cast to ``float32`` and
-normalize, optionally augment the waveform, then Log-Mel + Delta + Delta-Delta
-into ``[Batch, 3, n_mels, time_frames]``.
+normalize, optionally mix in SNR-controlled noise, augment the waveform, then
+Log-Mel + Delta + Delta-Delta into ``[Batch, 3, n_mels, time_frames]``.
 
 Augmentation is *conditional* and train-only: ``_silence_`` teaches the reject
-(OOD) boundary from raw background noise, so shifting or masking it would only
-blur that boundary, and ``eval()`` short-circuits both augmentations, which keeps
-validation metrics stable and the exported ONNX graph deterministic. The module
-holds no learnable parameters, only the Mel filterbank buffers.
+(OOD) boundary from raw background noise, so shifting, masking or mixing it
+would only blur that boundary, and ``eval()`` short-circuits every augmentation,
+which keeps validation metrics stable and the exported ONNX graph deterministic.
+The module holds no learnable parameters, only the Mel filterbank buffers and,
+for v4.0, the preloaded noise pools.
 """
 
 import os
@@ -31,6 +32,8 @@ from configs.config import (  # noqa: E402
     N_FREQ_MASKS,
     N_MELS,
     N_TIME_MASKS,
+    NOISE_MIX_PROB,
+    NOISE_SPEECH_SOURCE_PROB,
     PITCH_SHIFT_BINS_PER_OCTAVE,
     PITCH_SHIFT_MODE,
     PITCH_SHIFT_N_FFT,
@@ -39,6 +42,10 @@ from configs.config import (  # noqa: E402
     PITCH_SHIFT_SEMITONES,
     SAMPLE_RATE,
     SILENCE_CLASS_INDEX,
+    SNR_AMBIENT_MAX_DB,
+    SNR_AMBIENT_MIN_DB,
+    SNR_SPEECH_MAX_DB,
+    SNR_SPEECH_MIN_DB,
     TARGET_SAMPLES,
     TIME_MASK_PARAM,
     TIME_SHIFT_PROB,
@@ -317,6 +324,207 @@ class WaveformAugmentation(nn.Module):
         return F.pad(audio, (0, length - current))
 
 
+def _noise_pool_tensor(bank: torch.Tensor, name: str) -> torch.Tensor:
+    """Normalize a noise pool to a contiguous float32 ``[N, T]`` in [-1, 1].
+
+    ``int16`` pools are divided by ``INT16_NORMALIZER``, exactly the conversion
+    the front-end applies to the audio cache, so a noise clip and a clean clip
+    live on the same scale and the SNR arithmetic below is meaningful. ``None``
+    (or an empty pool) yields ``None``, which switches that source off.
+    """
+    if bank is None:
+        return None
+    if bank.ndim == 3 and bank.shape[1] == 1:
+        bank = bank.squeeze(1)
+    if bank.ndim != 2:
+        raise ValueError(
+            f"'{name}' noise pool must be [N, T] or [N, 1, T], got {tuple(bank.shape)}"
+        )
+    if bank.shape[0] == 0:
+        return None
+    if bank.dtype == torch.int16:
+        bank = bank.to(torch.float32) / INT16_NORMALIZER
+    else:
+        bank = bank.to(torch.float32)
+    return bank.contiguous()
+
+
+class WaveformNoiseMixer(nn.Module):
+    """SNR-controlled ambient / overlapping-speech mixing for the v4.0 front-end.
+
+    Input : ``[Batch, T]`` or ``[Batch, 1, T]`` float audio in [-1, 1] (the
+            front-end normalizes the int16 cache before calling this module),
+            the boolean ``eligible`` mask and, defensively, ``targets``.
+    Output: same shape, dtype and device as the input; every row that was not
+            selected is returned bit-for-bit untouched.
+
+    Three properties keep it safe inside the GPU pipeline:
+
+    * ``train()`` only, like :class:`WaveformAugmentation`. ``eval()`` -
+      validation, testing, ONNX export, inference - is an exact no-op, so no
+      split outside training ever sees a mixed waveform.
+    * ``_silence_`` is never mixed, not even with probability ``p``: the class has
+      to stay pure background noise for the OOD rejection boundary. It is
+      excluded twice, by ``eligible`` and by ``targets != silence_index``.
+    * Both pools are non-persistent buffers preloaded once as ``int16`` and
+      promoted to the accelerator by ``.to(device)``, so the hot path performs no
+      I/O, allocates no CPU audio path and never leaves PyTorch.
+
+    Mixing is ``y = y_clean + alpha * y_noise`` with
+
+        ``alpha = (rms(y_clean) / rms(y_noise)) * 10 ** (-SNR_dB / 20)``
+
+    The leading RMS ratio puts the two signals on a common level - without it
+    ``10 ** (-SNR_dB / 20)`` alone would only define an SNR for clips that happen
+    to share an RMS - and the exponential is the requested SNR as a linear gain.
+    One target SNR is drawn per eligible row, uniformly inside the ambient or the
+    speech range. When the mixture would exceed [-1, 1] both terms are scaled by
+    the same factor, which leaves the SNR intact and keeps the downstream int16 /
+    Mel path overflow-free.
+    """
+
+    def __init__(
+        self,
+        ambient_noise: torch.Tensor = None,
+        speech_noise: torch.Tensor = None,
+        p: float = NOISE_MIX_PROB,
+        ambient_snr_db=(SNR_AMBIENT_MIN_DB, SNR_AMBIENT_MAX_DB),
+        speech_snr_db=(SNR_SPEECH_MIN_DB, SNR_SPEECH_MAX_DB),
+        speech_source_prob: float = NOISE_SPEECH_SOURCE_PROB,
+        silence_index: int = None,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        self.p = float(p)
+        self.ambient_snr_db = self._check_snr_range(ambient_snr_db, "ambient_snr_db")
+        self.speech_snr_db = self._check_snr_range(speech_snr_db, "speech_snr_db")
+        self.speech_source_prob = float(speech_source_prob)
+        self.silence_index = silence_index
+        self.eps = float(eps)
+
+        # Non-persistent: the pools never enter a state_dict, so checkpoints and
+        # the ONNX export stay byte-compatible with the weights they describe.
+        self.register_buffer(
+            "ambient_noise",
+            _noise_pool_tensor(ambient_noise, "ambient"),
+            persistent=False,
+        )
+        self.register_buffer(
+            "speech_noise",
+            _noise_pool_tensor(speech_noise, "speech"),
+            persistent=False,
+        )
+
+    @staticmethod
+    def _check_snr_range(value, name: str):
+        low, high = (float(v) for v in value)
+        if high < low:
+            raise ValueError(f"{name} must be (min, max) with max >= min, got {value!r}")
+        return low, high
+
+    @property
+    def has_noise(self) -> bool:
+        return self.ambient_noise is not None or self.speech_noise is not None
+
+    @property
+    def enabled(self) -> bool:
+        """Mixing runs only in training mode, only with a pool, only if p > 0."""
+        return self.training and self.p > 0.0 and self.has_noise
+
+    @torch.no_grad()
+    def forward(
+        self,
+        waveform: torch.Tensor,
+        eligible: torch.Tensor = None,
+        targets: torch.Tensor = None,
+    ) -> torch.Tensor:
+        if not self.enabled:
+            return waveform
+
+        squeeze = waveform.ndim == 3 and waveform.shape[1] == 1
+        audio = waveform.squeeze(1) if squeeze else waveform
+        if audio.ndim != 2:
+            raise ValueError(
+                "WaveformNoiseMixer expects [Batch, T] or [Batch, 1, T], "
+                f"got {tuple(waveform.shape)}"
+            )
+
+        batch, device = audio.shape[0], audio.device
+        if eligible is None:
+            allowed = torch.ones(batch, dtype=torch.bool, device=device)
+        else:
+            allowed = eligible.reshape(-1).to(torch.bool)
+        # Defence in depth: '_silence_' is never mixed, whatever the caller
+        # passed as ``eligible``.
+        if targets is not None and self.silence_index is not None:
+            allowed = allowed & (targets.reshape(-1) != self.silence_index)
+        if self.p < 1.0:
+            allowed = allowed & (torch.rand(batch, device=device) < self.p)
+        if not bool(allowed.any()):
+            return waveform
+
+        rows = torch.nonzero(allowed, as_tuple=False).flatten()
+        if self.ambient_noise is not None and self.speech_noise is not None:
+            use_speech = (
+                torch.rand(rows.numel(), device=device) < self.speech_source_prob
+            )
+            ambient_rows = rows[~use_speech]
+            speech_rows = rows[use_speech]
+        elif self.speech_noise is not None:
+            ambient_rows = rows[:0]
+            speech_rows = rows
+        else:
+            ambient_rows = rows
+            speech_rows = rows[:0]
+
+        mixed = audio.clone()
+        if ambient_rows.numel():
+            mixed[ambient_rows] = self._mix_rows(
+                audio[ambient_rows], self.ambient_noise, self.ambient_snr_db
+            )
+        if speech_rows.numel():
+            mixed[speech_rows] = self._mix_rows(
+                audio[speech_rows], self.speech_noise, self.speech_snr_db
+            )
+        return mixed.unsqueeze(1) if squeeze else mixed
+
+    @torch.no_grad()
+    def _mix_rows(
+        self, clean: torch.Tensor, pool: torch.Tensor, snr_range
+    ) -> torch.Tensor:
+        """Mix ``clean [N, T]`` with one independently drawn pool clip per row."""
+        batch, length = clean.shape
+        indices = torch.randint(0, pool.shape[0], (batch,), device=pool.device)
+        noise = pool[indices].to(clean.device)
+        if noise.shape[-1] != length:
+            if noise.shape[-1] > length:
+                noise = noise[..., :length]
+            else:
+                noise = F.pad(noise, (0, length - noise.shape[-1]))
+
+        clean_rms = clean.pow(2).mean(dim=-1, keepdim=True).clamp_min(self.eps).sqrt()
+        noise_rms = noise.pow(2).mean(dim=-1, keepdim=True).clamp_min(self.eps).sqrt()
+
+        low, high = snr_range
+        snr_db = torch.rand((batch, 1), device=clean.device) * (high - low) + low
+        alpha = (clean_rms / noise_rms) * torch.pow(10.0, -snr_db / 20.0)
+
+        return self._limit_peak(clean + alpha * noise)
+
+    def _limit_peak(self, audio: torch.Tensor) -> torch.Tensor:
+        """Peak-normalize anything above 1.0, then hard-clamp as a backstop.
+
+        One factor is applied to the whole mixture, so ``clean`` and ``noise``
+        keep their ratio and the requested SNR survives; only the absolute level
+        changes, which is what keeps the int16 / Mel path in range.
+        """
+        peak = audio.abs().amax(dim=-1, keepdim=True)
+        scale = torch.where(
+            peak > 1.0, 1.0 / peak.clamp_min(self.eps), torch.ones_like(peak)
+        )
+        return (audio * scale).clamp(-1.0, 1.0)
+
+
 class AudioToThreeChannelMel(nn.Module):
     """Raw int16 audio -> GPU Log-Mel + Delta + Delta-Delta, conditionally augmented.
 
@@ -324,9 +532,9 @@ class AudioToThreeChannelMel(nn.Module):
              optionally, the batch ``targets`` used to shield ``_silence_`` clips.
     Output: ``[Batch, 3, n_mels, time_frames]`` (``torch.float32``).
 
-    Every augmentation (waveform pitch/time shift *and* SpecAugment) is applied
-    only in ``train()`` mode; call ``.eval()`` for the deterministic features used
-    by validation, export and inference.
+    Every augmentation (SNR noise mixing, waveform pitch/time shift *and*
+    SpecAugment) is applied only in ``train()`` mode; call ``.eval()`` for the
+    deterministic features used by validation, export and inference.
     """
 
     def __init__(
@@ -347,6 +555,8 @@ class AudioToThreeChannelMel(nn.Module):
         pitch_mode: str = PITCH_SHIFT_MODE,
         time_shift_prob: float = TIME_SHIFT_PROB,
         time_shift_ratio: float = TIME_SHIFT_RATIO,
+        noise_bank: dict = None,
+        noise_mix_prob: float = NOISE_MIX_PROB,
     ):
         super().__init__()
         self.augment = augment
@@ -374,6 +584,26 @@ class AudioToThreeChannelMel(nn.Module):
             p_time=time_shift_prob,
             time_shift_ratio=time_shift_ratio,
         )
+
+        # v4.0 SNR noise mixing. ``noise_bank`` carries the two int16 pools that
+        # the dataset preloaded in RAM; they become non-persistent buffers, so
+        # ``.to(device)`` promotes them to the accelerator exactly once and the
+        # training loop never reads noise from disk. Without a bank (inference,
+        # quantization, tests) the mixer stays absent and the front-end is the
+        # v3.0 pipeline.
+        ambient_noise = None
+        speech_noise = None
+        if noise_bank is not None:
+            ambient_noise = noise_bank.get("ambient")
+            speech_noise = noise_bank.get("speech")
+        self.noise_mixer = None
+        if noise_mix_prob > 0.0 and (ambient_noise is not None or speech_noise is not None):
+            self.noise_mixer = WaveformNoiseMixer(
+                ambient_noise=ambient_noise,
+                speech_noise=speech_noise,
+                p=noise_mix_prob,
+                silence_index=silence_index,
+            )
 
         # iid_masks=True draws an independent mask per clip, so the augmentation
         # stays per-sample instead of sharing one hole across the batch.
@@ -411,7 +641,11 @@ class AudioToThreeChannelMel(nn.Module):
 
         # Train-only, and the '_silence_' rows are excluded by ``augment_mask``
         # (``None`` when no labels were supplied, i.e. every clip is eligible).
+        # Noise mixing comes first, so the pitch/time shift perturbs the whole
+        # scene (command + background), and it re-checks '_silence_' itself.
         augment_mask = self._augment_mask(targets)
+        if self.augment and self.noise_mixer is not None:
+            x = self.noise_mixer(x, augment_mask, targets)
         if self.augment and self.waveform_augment:
             x = self.waveform_augmentation(x, augment_mask)
 
@@ -515,3 +749,55 @@ if __name__ == "__main__":
     print(f"eval  forward  : {eval_ms:8.1f} ms  (no augmentation)")
     print(f"train forward  : {train_ms:8.1f} ms  (augmented)")
     print(f"augmentation   : {train_ms - eval_ms:8.1f} ms  overhead")
+
+    # v4.0 noise mixing check on a synthetic int16 bank: the measured SNR of the
+    # mixture must match the requested one, '_silence_' must survive untouched,
+    # and the mixed waveform must stay inside [-1, 1].
+    bank = {
+        "ambient": torch.randint(
+            -3000, 3000, (32, 1, TARGET_SAMPLES), dtype=torch.int16
+        ),
+        "speech": torch.randint(
+            -3000, 3000, (32, 1, TARGET_SAMPLES), dtype=torch.int16
+        ),
+    }
+    mixer = WaveformNoiseMixer(
+        ambient_noise=bank["ambient"],
+        speech_noise=bank["speech"],
+        p=1.0,
+        speech_source_prob=0.0,
+        ambient_snr_db=(10.0, 10.0),
+        silence_index=0,
+    ).to(device)
+
+    clean = (torch.rand(8, 1, TARGET_SAMPLES, device=device) - 0.5) * 0.2
+    probe_targets = torch.tensor([0, 1, 2, 3, 0, 4, 5, 6], device=device)
+    mixer.train()
+    with torch.no_grad():
+        mixed = mixer(clean, probe_targets != 0, probe_targets)
+    residual = mixed - clean
+    silent = probe_targets == 0
+    # Measure on eligible rows only: '_silence_' rows add exact zeros to the
+    # residual and would bias the ratio upwards (0.75x power -> +1.25 dB).
+    measured_snr = 10.0 * torch.log10(
+        clean[~silent].pow(2).mean() / residual[~silent].pow(2).mean()
+    )
+
+    print("--- WaveformNoiseMixer check ---")
+    print(f"shape preserved : {tuple(mixed.shape) == tuple(clean.shape)}")
+    print(f"silence intact  : {torch.equal(mixed[silent], clean[silent])}")
+    print(f"measured SNR    : {measured_snr.item():.3f} dB (requested 10.000 dB)")
+    print(f"bounded [-1, 1] : {bool(mixed.abs().max() <= 1.0)}")
+    print(f"snr ranges      : ambient={mixer.ambient_snr_db} speech={mixer.speech_snr_db}")
+
+    extractor_with_noise = AudioToThreeChannelMel(noise_bank=bank).to(device)
+    extractor_with_noise.train()
+    with torch.no_grad():
+        for _ in range(runs):
+            extractor_with_noise(timed, timed_targets)
+        start = time.perf_counter()
+        for _ in range(runs):
+            extractor_with_noise(timed, timed_targets)
+        noise_ms = (time.perf_counter() - start) / runs * 1000.0
+    print(f"noise mixing   : {noise_ms - train_ms:8.1f} ms  additional overhead")
+

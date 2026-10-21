@@ -24,6 +24,10 @@ from configs.config import (  # noqa: E402
     NUM_WORKERS,
     SEED,
     SILENCE_LABEL,
+    SNR_AMBIENT_MAX_DB,
+    SNR_AMBIENT_MIN_DB,
+    SNR_SPEECH_MAX_DB,
+    SNR_SPEECH_MIN_DB,
     WEIGHT_DECAY,
     checkpoint_dir,
     reports_dir,
@@ -246,10 +250,24 @@ def main():
     save_labels(train_dataset.labels)
 
     # ``silence_index`` is read from the dataset so it cannot drift from the
-    # frozen label order.
+    # frozen label order. The v4.0 noise pools are int16 tensors in system RAM
+    # that ``.to(device)`` promotes to non-persistent buffers once, before the
+    # first batch, so the mixer never performs I/O inside the training loop.
     feature_extractor = AudioToThreeChannelMel(
-        silence_index=train_dataset.label_to_idx[SILENCE_LABEL]
+        silence_index=train_dataset.label_to_idx[SILENCE_LABEL],
+        noise_bank=train_dataset.noise_bank,
     ).to(device)
+    mixer = feature_extractor.noise_mixer
+    if mixer is not None:
+        print(
+            f"[*] Noise mixing ON (train only): p={mixer.p}, "
+            f"ambient SNR {SNR_AMBIENT_MIN_DB:.0f}-{SNR_AMBIENT_MAX_DB:.0f} dB, "
+            f"speech SNR {SNR_SPEECH_MIN_DB:.0f}-{SNR_SPEECH_MAX_DB:.0f} dB, "
+            "pool on "
+            f"{mixer.ambient_noise.device if mixer.ambient_noise is not None else 'n/a'}"
+        )
+    else:
+        print("[!] Noise mixing OFF: the training split produced no noise bank.")
 
     model = CommandSense(
         num_classes=len(train_dataset.labels), in_channels=3
