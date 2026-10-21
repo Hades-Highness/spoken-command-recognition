@@ -16,20 +16,20 @@
 - **Architecture**: Residual CNN (3 residual stages) with a three-channel Log-Mel front-end. **1,217,349 parameters** (≈4.87 MB in float32).
 - **Weights**: trained from scratch for **30 epochs** on the official speaker-disjoint splits with SNR-controlled noise mixing.
 - **Front-end**: `AudioToThreeChannelMel` (`src/transforms.py`) builds the Log-Mel + Δ + Δ² tensor **on the accelerator**, on the fly, from the raw `int16` waveforms.
-- **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions. Training includes controlled ambient-noise and background-speech mixing to target noise robustness; the gain has not yet been measured on a dedicated noisy test set.
+- **Task**: Multi-class Keyword Spotting (KWS) & Spoken Command Recognition, with explicit rejection of silence, out-of-vocabulary speech **and** low-confidence predictions. Training includes controlled ambient-noise and background-speech mixing. A held-out noise evaluation found substantially higher command accuracy than v3.0 at the tested SNRs; see the results and protocol below.
 - **Target Classes (37)**: `_silence_`, `_unknown_`, and the 35 command words `backward`, `bed`, `bird`, `cat`, `dog`, `down`, `eight`, `five`, `follow`, `forward`, `four`, `go`, `happy`, `house`, `learn`, `left`, `marvin`, `nine`, `no`, `off`, `on`, `one`, `right`, `seven`, `sheila`, `six`, `stop`, `three`, `tree`, `two`, `up`, `visual`, `wow`, `yes`, `zero`.
 - **Artifacts**: the v4.0 release provides `CommandSense_v4.0.pth` (trained weights), `CommandSense_v4.0.onnx` (exported for ONNX Runtime, with `T` and `tau` in its `metadata_props`) and `CommandSense_calibration_v4.0.json` (the fitted calibration, kept in `configs/calibration/` because it is versioned configuration rather than a weight).
-- **Scope**: this card documents the v4.0 weights and the calibrated deployment layer fitted on top of them — the SNR-controlled noise mixing, the `int16` RAM cache, the GPU-side feature extraction, the GPU-native conditional augmentation and the 30-epoch training schedule that produce them, and the temperature `T` and threshold `tau` that serve them. It reports v4.0 in isolation and makes no claim about any other release.
+- **Scope**: this card documents the v4.0 weights and calibrated deployment layer, including the SNR-controlled noise mixing, `int16` RAM cache, GPU-side feature extraction, conditional augmentation and 30-epoch training schedule. It also reports a held-out noisy-condition comparison with v3.0; other version comparisons are outside its scope.
 
 ---
 
 ## ★ Technical Innovations
 
-v4.0 keeps the residual network and adds **SNR-controlled noise mixing** to the training pipeline. This exposes eligible command clips to ambient noise and background speech; improved performance in those conditions is the training objective, not yet a measured result.
+v4.0 keeps the residual network and adds **SNR-controlled noise mixing** to the training pipeline. In the held-out evaluation, v4.0 outperforms v3.0 on the same noisy command clips at all four tested SNRs (5–20 dB). This result is specific to the noise sources and mixing protocol described below.
 
 | Mechanism | Implementation | Effect |
 | :-- | :-- | :-- |
-| **SNR-controlled noise mixing** | 50% of eligible training clips are mixed with noise sources at controlled signal-to-noise ratios. Ambient noise (`_background_noise_`) is mixed at 5–15 dB SNR, LibriSpeech speech at 15–25 dB SNR. Mixing happens on the GPU at the waveform stage, before feature extraction, and never touches the cached int16 clips. | Exposes the model to command audio with ambient noise and background speech. The higher SNR for LibriSpeech is intended to keep the command dominant. Robustness improvement has not yet been measured on a dedicated noisy test set. |
+| **SNR-controlled noise mixing** | 50% of eligible training clips are mixed with noise sources at controlled signal-to-noise ratios. Ambient noise (`_background_noise_`) is mixed at 5–15 dB SNR, LibriSpeech speech at 15–25 dB SNR. Mixing happens on the GPU at the waveform stage, before feature extraction, and never touches the cached int16 clips. | Exposes the model to command audio with ambient noise and background speech. On the held-out benchmark below, this training version scores higher than v3.0 at each tested noise level. |
 | **`_silence_` exclusion** | `_silence_` clips are **never** mixed with additional noise. They remain pure background noise. | The reject boundary stays sharp. `_silence_` teaches the model what "no command present" sounds like, and adding noise would blur that boundary. |
 | **Noise banks in RAM** | 256 ambient noise clips and 512 LibriSpeech clips are cached as int16 in RAM and promoted to GPU buffers once before training. | Mixing is fully GPU-resident, no disk I/O during training, no CPU overhead. |
 | **`int16` RAM cache** | `src/dataset.py` caches the raw waveform as `torch.int16` — 16,000 samples × 2 bytes ≈ 32 KB per clip — instead of pre-computed float32 spectrograms. | The resident dataset is ≈75% smaller, so the corpus fits in RAM alongside the model and the batches. |
@@ -99,7 +99,47 @@ The per-class report in `report_v4.0.txt` shows the residual error is concentrat
 - `_unknown_` recall: **97.64%** (v4.0) vs 98.55% (v3.0) — a **0.91 pt decrease**
 - Validation accuracy: **96.41%** (v4.0) vs 96.36% (v3.0) — a **0.05 pt increase**
 
-The clean-test command accuracy and `_unknown_` recall are lower than the corresponding v3.0 figures, while validation accuracy is slightly higher. These are observed cross-version differences; without a dedicated noisy test set, they do not establish that noise mixing improved robustness or caused the clean-test changes.
+The clean-test command accuracy and `_unknown_` recall are lower than the corresponding v3.0 figures, while validation accuracy is slightly higher. The separate held-out noise benchmark shows a substantial command-accuracy improvement over v3.0 for its tested mixtures. These version-level results do not isolate noise mixing from other training-run variation.
+
+---
+
+## ★ Noise Robustness Evaluation
+
+`robustness_report_v4.0.txt` re-scores all **11,005 command clips** from the official, speaker-disjoint `testing` split at four fixed SNR levels. It compares v4.0 with v3.0 using the **same clean command clips and the same noise mixture** for each condition. Top-1 is raw argmax over the 35 command classes and is independent of the confidence threshold.
+
+| SNR | v4.0 Top-1 | v3.0 Top-1 | Difference | v4.0 rejection rate | v3.0 rejection rate |
+| :-: | --: | --: | --: | --: | --: |
+| 5 dB | 75.24% | 50.96% | **+24.28 pp** | 41.73% | 29.48% |
+| 10 dB | 88.45% | 63.54% | **+24.91 pp** | 28.97% | 26.67% |
+| 15 dB | 92.69% | 74.27% | **+18.43 pp** | 19.97% | 22.08% |
+| 20 dB | 93.94% | 84.10% | **+9.84 pp** | 15.86% | 19.04% |
+| **Mean, 5–20 dB** | **87.58%** | **68.22%** | **+19.36 pp** | — | — |
+| Clean | 95.61% | 95.87% | **−0.25 pp** | 11.63% | 9.16% |
+
+The mean is the unweighted average across the four tested SNR values. On these fixed held-out mixtures, v4.0 improves raw command accuracy by **9.84–24.91 percentage points** over v3.0. At 5 dB both models remain substantially affected by noise: v4.0 reaches 75.24% Top-1, compared with 50.96% for v3.0.
+
+### - Served operating point
+
+The following v4.0 results apply its shipped calibration (`T = 1.252585`, `tau = 0.92`) to command clips only. Rejection rate is the share of command clips below `tau` and served as `_unknown_`; it is not the learned `_silence_` / `_unknown_` class recall. Accepted accuracy is conditional on clips that pass the threshold, and correct yield is the share of all command clips that are both accepted and correct.
+
+| Condition | Accepted accuracy | Coverage | Correct yield | Mean confidence |
+| :-- | --: | --: | --: | --: |
+| 5 dB | 90.32% | 58.27% | 52.63% | 84.15% |
+| 10 dB | 98.23% | 71.03% | 69.78% | 89.22% |
+| 15 dB | 99.28% | 80.03% | 79.45% | 92.54% |
+| 20 dB | 99.42% | 84.14% | 83.65% | 93.97% |
+| Clean | 99.57% | 88.37% | 87.99% | 95.54% |
+
+The robustness report's clean coverage (88.37%) and rejection rate (11.63%) use only the 11,005 command clips. They therefore differ from the calibration report's 88.95% coverage over all 12,105 command and rejection-class clips.
+
+In the v4.0/v3.0 comparison table, each model's rejection rate uses its own shipped calibration: v4.0 uses `T = 1.252585`, `tau = 0.92`; v3.0 uses `T = 1.311633`, `tau = 0.89`. Top-1 accuracy remains threshold-independent for both.
+
+### - Evaluation protocol and scope
+
+- Noise sources are held out from the v4.0 training noise bank: **121 non-overlapping one-second ambient chunks** from the held-out `_background_noise_` recordings, and **512 one-second LibriSpeech chunks** from `dev-clean`. The evaluated ambient recordings are `running_tap.wav` and `white_noise.wav`; the other four listed background-noise recordings are reserved for training.
+- Each command clip is mixed with a randomly selected ambient or speech clip at a 50/50 source probability, at the target SNR shown. The report records seed `42`; the speech noise bank came from `dev-clean`, because `test-clean` was not available in that run.
+- The report records one evaluation run. It tests four SNR values and a finite set of held-out sources; results should not be generalized to all environments, noise types, speakers or SNRs. The clean-to-noisy change within v4.0 is descriptive, not a controlled estimate of causal effect.
+- Reproduce with `python evaluate_robustness.py` for v4.0 only, or `python evaluate_robustness.py --compare_v3` for the v4.0/v3.0 comparison. See the generated [`robustness_report_v4.0.txt`](robustness_report_v4.0.txt) for the full run metadata and tables.
 
 Two caveats on reading this table:
 
@@ -233,12 +273,14 @@ The exported ONNX graph keeps emitting raw logits and stores `T` and `tau` in it
 | `confusion_matrix_v4.0.png` | 37×37 confusion matrix on the testing split |
 | `calibration_v4.0.png` | Reliability diagram before and after temperature scaling |
 | `coverage_vs_accuracy_v4.0.png` | Coverage and retained accuracy across the `tau` sweep |
+| `robustness_report_v4.0.txt` | Held-out noise evaluation, SNR results and v4.0/v3.0 comparison |
 
 Reproduce them with:
 
 ```
 python train.py      # trains v4.0 for 30 epochs with SNR-controlled noise mixing
 python evaluate.py   # fits T and tau -> configs/calibration/ + this folder
+python evaluate_robustness.py --compare_v3  # compares v4.0 and v3.0 on held-out noise
 ```
 
 `evaluate.py` seeds the RNG (`SEED = 42`), so a verification pass reproduces the fitted `T = 1.252585` and `tau* = 0.92` exactly.
@@ -248,9 +290,10 @@ python evaluate.py   # fits T and tau -> configs/calibration/ + this folder
 ## ★ Caveats
 
 - **The mechanisms act as a bundle.** The noise mixing strategy, the RAM representation, the front-end placement, the augmentation strategy, the provisioning fallback and the epoch budget are all part of one release. The published metrics are the outcome of the combination; this card does not attribute them to any single mechanism.
-- **Noise robustness remains unmeasured.** On the clean test split, the 35-command Top-1 accuracy is 95.61% (vs 95.87% in v3.0), and `_unknown_` recall is 97.64% (vs 98.55% in v3.0). These are observed cross-version differences; without a dedicated noisy test set, they do not establish either a robustness gain or that noise mixing caused the clean-split differences.
+- **Noise-test scope.** The held-out benchmark shows v4.0 ahead of v3.0 by 9.84–24.91 points at 5–20 dB SNR on the tested mixtures. It uses one run, a finite held-out bank (121 ambient and 512 speech chunks), and seed 42; broader noise types, SNRs, speakers and real recordings remain to be tested. These results establish the measured comparison for this protocol, not universal robustness or causality for noise mixing alone.
+- **Clean-audio score difference.** On the clean test split, v4.0's 35-command Top-1 accuracy is 95.61% (vs 95.87% in v3.0), and `_unknown_` recall is 97.64% (vs 98.55%). The clean-split difference is observed alongside the noisy-condition gains; this single comparison does not isolate its cause.
 - **The improvement is a training-data improvement, not a capacity improvement.** The architecture is a plain 1,217,349-parameter residual CNN: no layer was added, removed or resized. What changed is how the data reaches the model during training.
 - **The rejection clips are drawn at load time.** The 10,979-clip validation split and the 12,105-clip testing split (11,005 commands + 1,100 rejection clips) each contain 1,100 synthetic `_silence_` / `_unknown_` clips that `src/dataset.py` slices out of the held-out recordings rather than storing on disk. The two rejection-class recalls are therefore samples rather than constants: re-running the evaluation with a different seed moves those cells, while the 35 command columns do not move.
 - **The `Val Acc` column vs the calibration report.** The training history records 96.4204% at its best epoch; the calibration report measures 96.4113% on the same split through the evaluation path. The headline **96.41%** follows the report.
 - **The threshold trades coverage for precision, and it loses on net yield.** At `tau* = 0.92` the answers served are 99.57% correct, but the end-to-end yield of _answered and correct_ clips (88.57%) is below the 95.90% the threshold-free model scores on every clip. Choose `tau` from the sweep table, not from the headline accuracy.
-- **This card describes v4.0 only.** It is written to be read on its own and makes no claim about any other release: no other version appears in it, and no metric is stated as a delta against one. Comparisons across versions live in the repository's root `README.md`, where every version sits in a single table.
+- **Version comparison context.** The clean and noisy comparisons here are specifically against v3.0; the full version progression is in the repository's root `README.md`.

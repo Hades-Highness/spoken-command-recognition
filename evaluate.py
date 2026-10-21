@@ -1,25 +1,3 @@
-"""Calibration-aware evaluation of CommandSense (v2.2).
-
-The run has two halves, and they never share a split:
-
-1. **Fit** the temperature ``T`` and the confidence threshold ``tau`` on the
-   *validation* split, which the model never trained on.
-2. **Measure** the effect on the *testing* split: ECE before/after, coverage /
-   retained accuracy / FRR / FAR at ``tau*``, and the same 37x37 confusion
-   matrix as v2.1 so the two versions stay comparable.
-
-``reports/model_v2.2/`` receives ``report_v2.2.txt`` and three PNGs (reliability
-diagram, coverage vs accuracy, confusion matrix). The deployment artifact read by
-``src/inference.py`` and ``app.py`` goes to
-``configs/calibration/CommandSense_calibration_v2.2.json`` instead: it is
-versioned configuration rather than a weight, so it is kept out of both the
-report folder and the git-ignored ``checkpoints/`` tree.
-
-Like ``train.py``, an interrupted run still writes what it has, under an
-``_interrupted`` file-name suffix, and skips the deployment JSON so a partial fit
-can never be served by accident.
-"""
-
 import gc
 import json
 import os

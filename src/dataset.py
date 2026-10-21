@@ -52,7 +52,9 @@ SPEECH_COMMANDS_ROOT = os.path.join(str(DATA_DIR), "SpeechCommands")
 SPEECH_COMMANDS_DIR = os.path.join(SPEECH_COMMANDS_ROOT, "speech_commands_v0.02")
 LIBRISPEECH_ROOT = os.path.join(str(DATA_DIR), "LibriSpeech")
 
-LIBRISPEECH_SUBSETS = ("dev-clean", "train-clean-100")
+# 'test-clean' is never a training source: it only exists so
+# evaluate_robustness.py can provision held-out speech noise on request.
+LIBRISPEECH_SUBSETS = ("dev-clean", "test-clean", "train-clean-100")
 LIBRISPEECH_SPLIT_BY_SUBSET = {
     "training": "train-clean-100",
     "validation": "dev-clean",
