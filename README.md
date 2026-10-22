@@ -318,9 +318,10 @@ Continuous microphone interface for live acceptance testing:
 
 One-shot interface for threshold exploration:
 - Record with the browser or upload a clip
+- Clips of any length are analysed with a 1.0 s sliding window, so a 2-4 s recording does not need trimming
 - Choose the ONNX or PyTorch backend
 - Adjust the `tau` slider to see how the rejection threshold affects predictions
-- The result view shows the verdict, top-6 calibrated probabilities, and decision details
+- The result view shows the verdict, top-6 calibrated probabilities, the window the command was found in, and decision details
 
 Both tabs share the same model, calibration and inference runtime. Inference calls are serialized, so concurrent requests from multiple browser sessions are handled safely.
 
@@ -358,7 +359,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 - **Overlapping speech is mitigated, not solved:** the model has seen background speech at 15–25 dB SNR during training, but two talkers at similar levels, or command-command mixtures, are still not explicitly trained. The cocktail party problem remains an active limitation.
 - **INT8 CPU latency:** v3.1 reduces artifact size for web compatibility, but the INT8 CPU provider is currently ~1.68x slower than the float32 CPU provider.
 - **Single-run metrics:** the reported v4.0 accuracy is the result of a single training run.
-- **1.0 s rigid window:** clips are force-fitted to 1.0 s. Utterances longer than one second are truncated, and silence-trimmed clips are zero-padded when shorter.
+- **Sliding-window inference:** single recordings of any length are scanned in 1.0 s windows with a 0.5 s hop, and the window whose best command probability is highest decides the recording. Accuracy, calibration and `tau` are still measured on 1.0 s clips, so a 2-4 s recording compares more windows against the same threshold and can surface a spurious command more easily than a single 1.0 s clip.
 - **Scope:** strict 35-command keyword spotting with OOV rejection, not continuous speech recognition.
 
 ---
