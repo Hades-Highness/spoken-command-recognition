@@ -21,3 +21,13 @@ env/
 .vscode/
 .idea/
 .DS_Store
+
+# Web Environment (Next.js / Node)
+
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local
+web/.env.development.local
+web/.env.test.local
+web/.env.production.local

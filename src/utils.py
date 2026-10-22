@@ -92,10 +92,18 @@ def load_audio_file(filepath: str):
         ) from exc
 
 
-def prepare_waveform(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
-    """Resample to 16 kHz, downmix to mono and fit to exactly 1.0 s.
+def prepare_waveform(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    target_samples: int = TARGET_SAMPLES,
+) -> torch.Tensor:
+    """Resample to 16 kHz, downmix to mono and fit to ``target_samples``.
 
-    Returns a ``[1, TARGET_SAMPLES]`` tensor.
+    ``target_samples`` defaults to one 1.0 s clip, the training/evaluation
+    contract. Pass ``None`` to keep the whole recording; the sliding-window
+    inferencer needs that to score 2-4 s inputs instead of truncating them.
+
+    Returns a ``[1, target_samples]`` tensor (``[1, N]`` for ``None``).
     """
     if waveform.ndim == 1:
         waveform = waveform.unsqueeze(0)
@@ -108,11 +116,18 @@ def prepare_waveform(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
     if waveform.shape[0] > 1:
         waveform = torch.mean(waveform, dim=0, keepdim=True)
 
+    if target_samples is None:
+        return waveform.contiguous()
+
+    target_samples = int(target_samples)
+    if target_samples <= 0:
+        raise ValueError(f"target_samples must be > 0 or None, got {target_samples}.")
+
     current = waveform.shape[1]
-    if current < TARGET_SAMPLES:
-        waveform = torch.nn.functional.pad(waveform, (0, TARGET_SAMPLES - current))
-    elif current > TARGET_SAMPLES:
-        waveform = waveform[:, :TARGET_SAMPLES]
+    if current < target_samples:
+        waveform = torch.nn.functional.pad(waveform, (0, target_samples - current))
+    elif current > target_samples:
+        waveform = waveform[:, :target_samples]
 
     return waveform.contiguous()
 

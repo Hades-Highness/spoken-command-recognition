@@ -397,11 +397,23 @@ def predict_command(audio, backend, threshold):
     is_rejection_class = top_label in REJECTION_CLASSES
     served_label = top_label if passes else REJECT_LABEL
 
+    window_count = int(result.get("window_count", 1))
+    window_start = float(result.get("window_start_seconds", 0.0))
+    window_note = (
+        ""
+        if window_count <= 1
+        else (
+            " The command was found in the 1.0 s window starting at "
+            f"**{window_start:.2f} s** ({window_count} windows scanned with a "
+            "0.5 s hop)."
+        )
+    )
+
     if passes and not is_rejection_class:
         summary = (
             f"### {top_label}\n\n"
             f"Calibrated confidence **{confidence * 100:.1f} %** reaches "
-            f"tau **{threshold:.2f}**."
+            f"tau **{threshold:.2f}**.{window_note}"
         )
         status = f"**Accepted as a command:** `{top_label}`."
     elif passes and is_rejection_class:
@@ -432,6 +444,8 @@ def predict_command(audio, backend, threshold):
             f"| Rejection class | {'yes' if is_rejection_class else 'no'} |",
             f"| Temperature T | {result['temperature']:.4f} |",
             f"| Backend | `{result['backend']}` |",
+            f"| Windows scanned | {window_count} |",
+            f"| Winning window start | {window_start:.2f} s |",
         ]
     )
     return probabilities, summary, status, details

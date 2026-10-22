@@ -1,16 +1,21 @@
-"""Smoke test for the v3.1 INT8 artifact (no training, no re-quantization).
+"""Smoke test for the shipped INT8 artifact of ``MODEL_VERSION`` (no training, no re-export).
 
-Loads the two ONNX graphs ``quantize_int8.py`` leaves in
-``checkpoints/model_v3.1/`` and compares them on a seeded draw of the *testing*
-split - the split that trained neither the weights, nor the calibration ranges, nor
-the temperature/threshold pair. It asserts what a deployable INT8 copy must keep:
-the same output shape (``NUM_CLASSES`` raw logits on a dynamic batch axis), top-1
-agreement with the float32 graph of at least ``TOP1_AGREEMENT_MIN``, per-class
-agreement including the ``_silence_`` / ``_unknown_`` rejection classes (so a class
-that quantizes badly cannot hide in the aggregate), mean absolute softmax drift
-below ``SOFTMAX_DRIFT_MAX``, and the operating point the artifact documents
-(``commandsense.calibration.*``) matching the v3.1 JSON ``src/inference.py`` serves
-and still transferring to the quantized graph within tolerance on this draw.
+Loads the pair ``export_onnx.py`` leaves in ``checkpoints/model_<version>/`` - the
+float32 fidelity reference ``<MODEL_NAME>_<version>_fp32.onnx`` and the deployment
+artifact ``<MODEL_NAME>_<version>.onnx`` - and compares them on a seeded draw of the
+*testing* split, the split that trained neither the weights, nor the calibration
+ranges, nor the temperature/threshold pair. Both graphs take raw 1.0 s waveforms
+(the mel/delta front-end is baked into them), so the clips are fed on the same
+contract ``src/inference.py`` and the browser client use. It asserts what a
+deployable INT8 copy must keep: the input contract (``raw_audio``, rank 2, one
+clip per row) and the output shape (``NUM_CLASSES`` raw logits on a dynamic batch
+axis), top-1 agreement with the float32 graph of at least ``TOP1_AGREEMENT_MIN``,
+per-class agreement including the ``_silence_`` / ``_unknown_`` rejection classes
+(so a class that quantizes badly cannot hide in the aggregate), mean absolute
+softmax drift below ``SOFTMAX_DRIFT_MAX``, and the operating point the artifact
+documents (``commandsense.calibration.*``) matching the version's JSON that
+``src/inference.py`` serves and still transferring to the quantized graph within
+tolerance on this draw.
 
 Over the whole testing split (12,105 clips) 99.55% of the float32 labels survive,
 and the few flips sit on near ties whose float32 top-1/top-2 softmax margin is
@@ -27,7 +32,7 @@ decision-space bounds above are the ones that characterise a usable copy, becaus
 
 Latency is measured and printed, never asserted: it is a property of the host and of
 the ONNX Runtime build, and on the CPU provider the QDQ graph is *not* faster (see
-``reports/model_v3.1/quantization_report.txt``).
+``reports/model_v4.0/quantization_report.txt``).
 
 Run directly:  python tests/test_v3_1_quantization.py
 """
@@ -39,22 +44,24 @@ import time
 
 import numpy as np
 import onnxruntime as ort
-import torch
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from configs.config import (  # noqa: E402
-    MODEL_NAME,
     MODEL_VERSION,
     NUM_CLASSES,
     REJECTION_CLASSES,
     SEED,
-    checkpoint_dir,
+    TARGET_SAMPLES,
 )
-from quantize_int8 import read_calibration_metadata  # noqa: E402  (one reader)
+from export_onnx import (  # noqa: E402  (the exporter's own artifact helpers)
+    INPUT_NAME,
+    artifact_paths,
+    read_calibration_metadata,
+    waveform_batch,
+)
 from src import calibration  # noqa: E402  (the runtime's own T/tau maths)
 from src.dataset import SpeechCommandsDataset  # noqa: E402
-from src.transforms import AudioToThreeChannelMel  # noqa: E402
 from train import set_seed  # noqa: E402  (shared seeding helper, as in evaluate.py)
 
 VERSION = MODEL_VERSION                # release under test: its INT8 graph + float32
@@ -63,15 +70,14 @@ EVALUATION_SPLIT = "testing"           # never seen by training, calibration or 
 # 1,000 clips is ~27 per class on the 37-label axis: enough for the per-class table
 # below to say something, while the split build still dominates the runtime.
 EVALUATION_SAMPLES = 1000
-INPUT_NAME = "input"
 CPU_PROVIDERS = ["CPUExecutionProvider"]
-# Top-1 agreement the calibration run measured over the *whole* testing split, as
-# printed by quantize_int8.py into reports/model_v3.1/quantization_report.txt. The
-# floor is derived from it rather than picked: at N = EVALUATION_SAMPLES the binomial
-# standard error of an agreement estimate is sqrt(p (1 - p) / N) ~= 0.21 pt, so three
-# standard errors below the measured value is ~98.92% - a round 95% would let a real
-# 3-point regression through, while asserting the measured value itself would fail on
-# the draw alone. Refresh MEASURED_TOP1_AGREEMENT whenever the report is regenerated.
+# Top-1 agreement measured for the shipped line of artifacts over the *whole* testing
+# split (see reports/model_v4.0/quantization_report.txt). The floor is derived from it
+# rather than picked: at N = EVALUATION_SAMPLES the binomial standard error of an
+# agreement estimate is sqrt(p (1 - p) / N) ~= 0.21 pt, so three standard errors below
+# the measured value is ~98.92% - a round 95% would let a real 3-point regression
+# through, while asserting the measured value itself would fail on the draw alone.
+# Refresh MEASURED_TOP1_AGREEMENT whenever the artifact is rebuilt and re-measured.
 MEASURED_TOP1_AGREEMENT = 0.9955
 TOP1_AGREEMENT_SIGMA = float(
     np.sqrt(
@@ -92,58 +98,53 @@ SOFTMAX_DRIFT_MAX = 0.05
 # T/tau. A 1,000-clip draw carries ~0.95 pt of sampling error on a coverage estimate
 # (~1.3 pt for an unpaired gap) and this draw is paired (both graphs score the same
 # clips), so the guard is generous; the shipped decision is made on the whole split
-# inside quantize_int8.py, with a 0.5 pt tolerance.
+# inside the exporter's calibration pass, with a 0.5 pt tolerance.
 COVERAGE_TOLERANCE_MAX = 0.02
 BENCHMARK_ROUNDS = 3
-
-
-def onnx_path(suffix):
-    """Locate an artifact of the INT8 release."""
-    return checkpoint_dir(VERSION) / f"{MODEL_NAME}_{VERSION}{suffix}.onnx"
 
 
 def load_graph(path):
     """Open a graph on the CPU provider, failing with an actionable message."""
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"'{path}' is missing. Run 'python quantize_int8.py' first: it exports "
+            f"'{path}' is missing. Run 'python export_onnx.py' first: it exports "
             f"the float32 reference next to the INT8 graph."
         )
     return ort.InferenceSession(str(path), providers=CPU_PROVIDERS)
 
 
 def testing_sample(limit=EVALUATION_SAMPLES):
-    """Stream ``limit`` clips of the testing split through the deployment front-end.
+    """Stream ``limit`` clips of the testing split as deployment-ready waveforms.
 
     ``set_seed`` also fixes the global generator the dataset draws its extra
     ``_silence_`` / ``_unknown_`` clips from, so both the sampling and the sampled
-    content are reproducible from run to run. The targets and the label list come
-    back with the features because the per-class table below needs them.
+    content are reproducible from run to run. Clips go through ``waveform_batch`` -
+    the exporter's own conversion, so the payload a graph sees here is byte-for-byte
+    what the calibration pass and the browser client feed it. The targets and the
+    label list come back with the clips because the per-class table below needs them.
     """
     set_seed(SEED)
 
     dataset = SpeechCommandsDataset(
         subset=EVALUATION_SPLIT, cache_in_ram=False, return_audio=True
     )
-    extractor = AudioToThreeChannelMel().eval()
     indices = np.random.default_rng(SEED).choice(
         len(dataset), size=limit, replace=False
     )
     print(f"[*] Evaluating on {limit} / {len(dataset)} '{EVALUATION_SPLIT}' clips")
 
-    features, targets = [], []
-    with torch.no_grad():
-        for index in indices:
-            audio, target = dataset[int(index)]
-            features.append(extractor(audio.unsqueeze(0)).numpy().astype(np.float32))
-            targets.append(int(target))
-    return features, np.asarray(targets, dtype=np.int64), list(dataset.labels)
+    clips, targets = [], []
+    for index in indices:
+        audio, target = dataset[int(index)]
+        clips.append(waveform_batch(audio))
+        targets.append(int(target))
+    return clips, np.asarray(targets, dtype=np.int64), list(dataset.labels)
 
 
-def predict(session, features):
+def predict(session, clips):
     """Stack per-clip logits into a single ``[n, NUM_CLASSES]`` matrix."""
     return np.concatenate(
-        [session.run(None, {INPUT_NAME: feature})[0] for feature in features], axis=0
+        [session.run(None, {INPUT_NAME: clip})[0] for clip in clips], axis=0
     )
 
 
@@ -186,7 +187,7 @@ def per_class_agreement(state):
     return rows
 
 
-def milliseconds_per_clip(session, features, rounds=BENCHMARK_ROUNDS):
+def milliseconds_per_clip(session, clips, rounds=BENCHMARK_ROUNDS):
     """Median, minimum and maximum ms per single-clip call (informational only).
 
     Median is the headline, but the spread is what says whether a difference
@@ -194,19 +195,19 @@ def milliseconds_per_clip(session, features, rounds=BENCHMARK_ROUNDS):
     asserted.
     """
     for _ in range(5):
-        session.run(None, {INPUT_NAME: features[0]})
+        session.run(None, {INPUT_NAME: clips[0]})
     timings = []
     for _ in range(rounds):
         start = time.perf_counter()
-        for feature in features:
-            session.run(None, {INPUT_NAME: feature})
-        timings.append((time.perf_counter() - start) / len(features) * 1000.0)
+        for clip in clips:
+            session.run(None, {INPUT_NAME: clip})
+        timings.append((time.perf_counter() - start) / len(clips) * 1000.0)
     return {
         "median_ms": float(np.median(timings)),
         "min_ms": float(np.min(timings)),
         "max_ms": float(np.max(timings)),
         "rounds": int(rounds),
-        "samples": int(len(features)),
+        "samples": int(len(clips)),
     }
 
 
@@ -214,41 +215,81 @@ _PREPARED = {}
 
 
 def prepared():
-    """Load both graphs and the evaluation features once per process.
+    """Load both graphs and the evaluation clips once per process.
 
     Cached so the checks below - and pytest, which calls every ``test_*``
     function independently - share a single split build: decoding the testing
     clips dominates the runtime of this file.
     """
     if not _PREPARED:
-        fp32_path, int8_path = onnx_path("_fp32"), onnx_path("_int8")
+        fp32_path, int8_path = artifact_paths(VERSION)
         fp32_session, int8_session = load_graph(fp32_path), load_graph(int8_path)
-        features, targets, labels = testing_sample()
+        clips, targets, labels = testing_sample()
         _PREPARED.update(
             fp32_path=fp32_path,
             int8_path=int8_path,
             fp32_session=fp32_session,
             int8_session=int8_session,
-            features=features,
+            clips=clips,
             targets=targets,
             labels=labels,
-            fp32_logits=predict(fp32_session, features),
-            int8_logits=predict(int8_session, features),
+            fp32_logits=predict(fp32_session, clips),
+            int8_logits=predict(int8_session, clips),
         )
     return _PREPARED
 
 
 def test_graph_contract():
-    """The INT8 graph must expose NUM_CLASSES logits over a batch-agnostic axis."""
-    shape = list(prepared()["int8_session"].get_outputs()[0].shape)
+    """Both graphs must publish the waveform-in / logits-out contract of the runtime.
+
+    The input side matters as much as the output side: ``src/inference.py`` and the
+    browser client decide what to feed a graph from its input *rank*, so a shipped
+    artifact that silently went back to rank-4 features (or lost the
+    ``raw_audio`` name, or a fixed 16,000-sample axis) would break every consumer
+    that already expects the baked front-end.
+    """
+    state = prepared()
+    for name in ("fp32", "int8"):
+        inputs = state[f"{name}_session"].get_inputs()
+        assert len(inputs) == 1, (
+            f"{name} graph exposes {len(inputs)} inputs "
+            f"({[value.name for value in inputs]}), but the runtime feeds exactly one"
+        )
+        graph_input = inputs[0]
+        assert graph_input.name == INPUT_NAME, (
+            f"{name} input is '{graph_input.name}', but the runtime and the browser "
+            f"client bind '{INPUT_NAME}'"
+        )
+        shape = list(graph_input.shape)
+        assert len(shape) == 2, (
+            f"{name} input rank is {len(shape)} (shape {shape}), so consumers would "
+            "treat it as feature tensors instead of raw waveforms: the mel/delta "
+            "front-end is no longer baked into this graph"
+        )
+        assert graph_input.type == "tensor(float)", (
+            f"{name} input type is {graph_input.type}, but clients feed float32 PCM"
+        )
+        assert not isinstance(shape[0], int), (
+            f"{name} input shape {shape} pins the batch size, so the runtime could "
+            "not serve N clips in one call"
+        )
+        assert shape[1] == TARGET_SAMPLES, (
+            f"{name} input shape {shape} does not take one {TARGET_SAMPLES}-sample "
+            "1.0 s clip per row"
+        )
+
+    shape = list(state["int8_session"].get_outputs()[0].shape)
     assert shape[-1] == NUM_CLASSES, (
         f"INT8 output shape {shape} does not end in {NUM_CLASSES} logits"
     )
     assert not isinstance(shape[0], int), (
         f"INT8 graph lost its dynamic batch axis: output shape {shape} pins the "
-        "batch size, so the v4.0 runtime could not serve N clips in one call"
+        "batch size, so the runtime could not serve N clips in one call"
     )
-    print(f"[OK] INT8 output contract: {shape}")
+    print(
+        f"[OK] graph contract: input '{INPUT_NAME}' [B, {TARGET_SAMPLES}] float32 "
+        f"waveforms, INT8 output {shape}"
+    )
 
 
 def test_output_shape():
@@ -311,7 +352,7 @@ def test_calibration_metadata():
     """The artifact must document the very T/tau the runtime serves.
 
     ``calibration.metadata_to_onnx_props`` is the writer side (used by
-    ``export_onnx.embed_calibration_metadata``, which ``quantize_int8.py`` calls) and
+    ``export_onnx.embed_calibration_metadata``, which ``export_onnx.main`` calls) and
     ``read_calibration_metadata`` the reader side, so this is the round trip on the
     shipped file: a runtime that only has the graph can recover the operating point
     from ``commandsense.calibration.*`` without the JSON. The payload the runtime loads
@@ -322,7 +363,7 @@ def test_calibration_metadata():
     payload = calibration.load_calibration(version=VERSION)
     assert payload, (
         f"no calibration payload for {VERSION}: run evaluate.py or "
-        "quantize_int8.py before this test"
+        "python export_onnx.py before this test"
     )
     expected = calibration.metadata_to_onnx_props(payload)
     graph = read_calibration_metadata(state["int8_path"])
@@ -334,7 +375,7 @@ def test_calibration_metadata():
     missing = sorted(set(served) - set(graph))
     assert not missing, (
         f"the INT8 graph is missing {len(missing)} calibration metadata entries "
-        f"({missing}): re-run quantize_int8.py so the artifact describes itself"
+        f"({missing}): re-run python export_onnx.py so the artifact describes itself"
     )
     for key in ("temperature", "confidence_threshold"):
         assert abs(float(graph[key]) - float(served[key])) < 1e-9, (
@@ -358,7 +399,8 @@ def test_operating_point_transfer():
     Coverage and retained accuracy of both graphs are measured at the payload's own
     (T, tau). The bound is the shipped 0.5 pt tolerance plus the sampling slack of a
     1000-clip draw, so only a real shift of the decision can break it - the case the
-    re-fit branch of ``quantize_int8.py`` exists to catch.
+    exporter's calibration pass exists to catch (it measures the shipped T/tau on the
+    whole split and fails when the INT8 graph has moved the operating point).
     """
     state = prepared()
     payload = calibration.load_calibration(version=VERSION)
@@ -459,10 +501,10 @@ def report_metrics():
     # and of the ONNX Runtime build, and the QDQ graph is not the faster one here.
     print(
         "[i] latency on this host (1 clip/call, CPUExecutionProvider, "
-        f"{BENCHMARK_ROUNDS} rounds x {len(state['features'])} clips):"
+        f"{BENCHMARK_ROUNDS} rounds x {len(state['clips'])} clips):"
     )
     for name in ("fp32", "int8"):
-        timings = milliseconds_per_clip(state[f"{name}_session"], state["features"])
+        timings = milliseconds_per_clip(state[f"{name}_session"], state["clips"])
         print(
             f"      {name:>5s}  median {timings['median_ms']:.3f} ms/clip  "
             f"(min {timings['min_ms']:.3f}, max {timings['max_ms']:.3f})"

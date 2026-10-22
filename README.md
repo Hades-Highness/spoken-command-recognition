@@ -138,6 +138,7 @@ flowchart LR
 | Time frames | 63 |
 | Channels | 3 — Log-Mel, Δ (first derivative), Δ² (second derivative) |
 | Input tensor | `[batch, 3, 64, 63]` |
+| ONNX input (v4.1+) | `[batch, 16000]` raw audio — the front-end above is baked into the graph |
 
 ### Model architecture
 
@@ -176,9 +177,8 @@ flowchart LR
 ├── tests/                        # Pipeline, calibration and quantization smoke tests
 ├── app.py                        # Unified two-tab Gradio interface
 ├── evaluate.py                   # Metrics, calibration fit and tau sweep
-├── export_onnx.py                # PyTorch to ONNX exporter
+├── export_onnx.py                # Baked front-end export + static INT8 (QDQ) quantization
 ├── listen.py                     # SharedRuntime, KeywordSpotter and optional CLI
-├── quantize_int8.py              # Static INT8 quantization pipeline
 ├── requirements.txt
 └── train.py                      # Training pipeline with AMP and noise mixing
 ```
@@ -201,13 +201,24 @@ Checkpoints are not committed to keep the repository lightweight. Grab the **v4.
 
 ```text
 checkpoints/model_v4.0/
-├── CommandSense_v4.0.pth         # Trained with SNR-controlled noise mixing
-└── CommandSense_v4.0.onnx        # Exported ONNX graph, carries T and tau in metadata
+├── CommandSense_v4.0.pth          # Trained with SNR-controlled noise mixing
+├── CommandSense_v4.0_int8.onnx    # INT8 QDQ graph: [B, 3, 64, 63] features in, logits out
+└── CommandSense_v4.0_fp32.onnx    # The same graph before quantization
 ```
+
+The v4.0 graphs consume the three-channel log-mel features, so the front-end runs
+in Python. From **v4.1** on the exporter bakes the front-end into the graph: the
+artifact is named `CommandSense_<version>.onnx` and takes `[B, 16000]` raw audio
+(float32, 16 kHz mono) instead. `src/inference.py` and `listen.py` read the input
+rank of whichever graph they load and feed the matching payload, so old and new
+artifacts both work unchanged.
+
+The configured `MODEL_VERSION` in `configs/config.py` decides which folder is read -
+keep it pointing at the release you downloaded.
 
 The fitted operating point is tracked in git at `configs/calibration/CommandSense_calibration_v4.0.json` (`T = 1.252585`, `tau = 0.92`) and is resolved automatically.
 
-*(Note: To reproduce training from scratch, use `train.py`, which writes to `checkpoints/model_v4.0/`. To build the INT8 deployment graph, run `python quantize_int8.py` after exporting.)*
+*(Note: To reproduce training from scratch, use `train.py`, which writes to `checkpoints/model_v4.0/`. To build the deployment graph, run `python export_onnx.py`: that single command exports the float32 reference and quantizes it to the INT8 artifact.)*
 
 ### 3. Launch the unified web interface
 
@@ -227,7 +238,7 @@ Both tabs share one process-wide runtime, so the model, calibration and ONNX ses
 ```bash
 python train.py          # trains v4.0 from scratch with noise mixing
 python evaluate.py       # fits T/tau and generates reports
-python export_onnx.py    # exports v4.0 to float32 ONNX
+python export_onnx.py    # exports the float32 graph and the INT8 deployment graph
 ```
 
 The first training run downloads Google Speech Commands v0.02 (≈2.3 GB) and LibriSpeech (≈6.3 GB).
@@ -307,9 +318,10 @@ Continuous microphone interface for live acceptance testing:
 
 One-shot interface for threshold exploration:
 - Record with the browser or upload a clip
+- Clips of any length are analysed with a 1.0 s sliding window, so a 2-4 s recording does not need trimming
 - Choose the ONNX or PyTorch backend
 - Adjust the `tau` slider to see how the rejection threshold affects predictions
-- The result view shows the verdict, top-6 calibrated probabilities, and decision details
+- The result view shows the verdict, top-6 calibrated probabilities, the window the command was found in, and decision details
 
 Both tabs share the same model, calibration and inference runtime. Inference calls are serialized, so concurrent requests from multiple browser sessions are handled safely.
 
@@ -347,7 +359,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 - **Overlapping speech is mitigated, not solved:** the model has seen background speech at 15–25 dB SNR during training, but two talkers at similar levels, or command-command mixtures, are still not explicitly trained. The cocktail party problem remains an active limitation.
 - **INT8 CPU latency:** v3.1 reduces artifact size for web compatibility, but the INT8 CPU provider is currently ~1.68x slower than the float32 CPU provider.
 - **Single-run metrics:** the reported v4.0 accuracy is the result of a single training run.
-- **1.0 s rigid window:** clips are force-fitted to 1.0 s. Utterances longer than one second are truncated, and silence-trimmed clips are zero-padded when shorter.
+- **Sliding-window inference:** single recordings of any length are scanned in 1.0 s windows with a 0.5 s hop, and the window whose best command probability is highest decides the recording. Accuracy, calibration and `tau` are still measured on 1.0 s clips, so a 2-4 s recording compares more windows against the same threshold and can surface a spurious command more easily than a single 1.0 s clip.
 - **Scope:** strict 35-command keyword spotting with OOV rejection, not continuous speech recognition.
 
 ---

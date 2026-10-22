@@ -161,6 +161,8 @@ python tests/test_v3_1_quantization.py  # re-measures the artifact and prints th
 
 `quantize_int8.py` seeds the RNG (`SEED = 42`) before calibration, so a rebuild from the same checkpoint reproduces the same activation ranges, the same `T`/`tau` decision and the same report.
 
+> **Superseded:** `quantize_int8.py` has since been folded into `export_onnx.py`, which now builds the float32 graph, the INT8 graph and the embedded operating point in a single `python export_onnx.py` run. The v3.1 artifacts above were produced by the standalone script as it stood then.
+
 ---
 
 ## ★ Caveats
