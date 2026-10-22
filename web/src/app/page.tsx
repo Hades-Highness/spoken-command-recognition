@@ -2,9 +2,9 @@
 
 import { useCallback, useRef, useState } from "react";
 import { AnimatePresence, motion, MotionConfig } from "framer-motion";
-import ContinuousVisualizer, {
-  type ContinuousVisualizerHandle,
-} from "@/components/ContinuousVisualizer";
+import ContinuousMode, {
+  type ContinuousModeHandle,
+} from "@/components/ContinuousMode";
 import Header from "@/components/Header";
 import ModeToggle, { type RecognitionMode } from "@/components/ModeToggle";
 import SettingsModal, {
@@ -18,20 +18,14 @@ const MICROPHONES: MicrophoneOption[] = [
 
 export default function Home() {
   const [mode, setMode] = useState<RecognitionMode>("continuous");
-  const [isListening, setIsListening] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [microphoneId, setMicrophoneId] = useState(MICROPHONES[0].deviceId);
-  const continuousRef = useRef<ContinuousVisualizerHandle>(null);
+  const continuousRef = useRef<ContinuousModeHandle>(null);
 
   const handleModeChange = (nextMode: RecognitionMode) => {
     setMode(nextMode);
-    setIsListening(false);
     setIsCapturing(false);
-  };
-
-  const handleToggleListening = () => {
-    setIsListening((current) => !current);
   };
 
   const handleToggleCapture = () => {
@@ -73,10 +67,9 @@ export default function Home() {
                 className="w-full"
               >
                 {mode === "continuous" ? (
-                  <ContinuousVisualizer
+                  <ContinuousMode
                     ref={continuousRef}
-                    isListening={isListening}
-                    onToggleListening={handleToggleListening}
+                    microphoneId={microphoneId}
                   />
                 ) : (
                   <SingleOscilloscope

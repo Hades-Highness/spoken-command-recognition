@@ -1,44 +1,39 @@
 "use client";
 
-import { useImperativeHandle, useState, type Ref } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 const WAVE_BAR_HEIGHTS = [18, 34, 54, 30, 70, 46, 26, 58, 38, 22];
 
-type HistoryEntry = {
+export type HistoryEntry = {
   id: string;
   command: string;
   /** Confidence in the 0..1 range, rendered as a percentage. */
   confidence: number;
-  /** Pre-formatted compact relative time, for example "2m". */
+  /** Pre-formatted wall-clock time, for example "14:02:11". */
   timestamp: string;
 };
 
-export type ContinuousVisualizerHandle = {
-  clearHistory: () => void;
-};
-
 type ContinuousVisualizerProps = {
-  ref?: Ref<ContinuousVisualizerHandle>;
   isListening: boolean;
+  /** True while the model is loading or the microphone is opening. */
+  isBusy: boolean;
+  /** One-line explanation of the current state. */
+  statusMessage: string;
+  /** Replaces the status line when the session failed. */
+  errorMessage: string | null;
+  /** Detections in reverse chronological order. */
+  history: HistoryEntry[];
   onToggleListening: () => void;
 };
 
 export default function ContinuousVisualizer({
-  ref,
   isListening,
+  isBusy,
+  statusMessage,
+  errorMessage,
+  history,
   onToggleListening,
 }: ContinuousVisualizerProps) {
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      clearHistory: () => setHistory([]),
-    }),
-    [],
-  );
-
   return (
     <section
       aria-label="Continuous listening"
@@ -70,13 +65,17 @@ export default function ContinuousVisualizer({
           <button
             type="button"
             onClick={onToggleListening}
+            disabled={isBusy}
+            aria-busy={isBusy}
             aria-pressed={isListening}
             aria-label={
-              isListening
-                ? "Stop continuous listening"
-                : "Start continuous listening"
+              isBusy
+                ? "Preparing the recognition session"
+                : isListening
+                  ? "Stop continuous listening"
+                  : "Start continuous listening"
             }
-            className={`relative flex h-20 w-20 items-center justify-center rounded-full border transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-4 focus-visible:ring-offset-background sm:h-36 sm:w-36 ${
+            className={`relative flex h-20 w-20 items-center justify-center rounded-full border transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-4 focus-visible:ring-offset-background disabled:cursor-progress sm:h-36 sm:w-36 ${
               isListening
                 ? "border-primary-hover bg-primary/20 shadow-[0_0_60px_-10px_rgba(249,43,53,0.65)]"
                 : "border-white/15 bg-white/[0.04] hover:border-primary/60 hover:bg-primary/10"
@@ -98,12 +97,22 @@ export default function ContinuousVisualizer({
           </button>
         </div>
 
-        <h2
-          aria-live="polite"
-          className="max-w-[10rem] text-center text-base font-semibold tracking-tight text-text-main sm:max-w-sm sm:text-2xl"
-        >
-          {isListening ? "Speak a command" : "Start a continuous session"}
+        <h2 className="max-w-[10rem] text-center text-base font-semibold tracking-tight text-text-main sm:max-w-sm sm:text-2xl">
+          {isBusy
+            ? "Preparing the model"
+            : isListening
+              ? "Speak a command"
+              : "Start a continuous session"}
         </h2>
+
+        <p
+          role="status"
+          className={`max-w-[13rem] text-center text-[11px] leading-4 sm:max-w-sm sm:text-xs ${
+            errorMessage ? "text-primary-hover" : "text-text-muted"
+          }`}
+        >
+          {errorMessage ?? statusMessage}
+        </p>
 
         <div
           aria-hidden="true"

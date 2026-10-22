@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# onnx runtime wasm assets, copied from node_modules by
+# scripts/copy-ort-runtime.mjs (run on install, dev and build)
+/public/ort
