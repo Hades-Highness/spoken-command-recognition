@@ -1,69 +1,104 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
+import ContinuousVisualizer, {
+  type ContinuousVisualizerHandle,
+} from "@/components/ContinuousVisualizer";
+import Header from "@/components/Header";
+import ModeToggle, { type RecognitionMode } from "@/components/ModeToggle";
+import SettingsModal, {
+  type MicrophoneOption,
+} from "@/components/SettingsModal";
+import SingleOscilloscope from "@/components/SingleOscilloscope";
+
+const MICROPHONES: MicrophoneOption[] = [
+  { deviceId: "default", label: "System default microphone" },
+];
 
 export default function Home() {
+  const [mode, setMode] = useState<RecognitionMode>("continuous");
+  const [isListening, setIsListening] = useState(false);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [microphoneId, setMicrophoneId] = useState(MICROPHONES[0].deviceId);
+  const continuousRef = useRef<ContinuousVisualizerHandle>(null);
+
+  const handleModeChange = (nextMode: RecognitionMode) => {
+    setMode(nextMode);
+    setIsListening(false);
+    setIsCapturing(false);
+  };
+
+  const handleToggleListening = () => {
+    setIsListening((current) => !current);
+  };
+
+  const handleToggleCapture = () => {
+    setIsCapturing((current) => !current);
+  };
+
+  const handleClearHistory = useCallback(() => {
+    continuousRef.current?.clearHistory();
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <MotionConfig reducedMotion="user">
+      <div className="flex flex-1 flex-col">
+        <Header onOpenSettings={handleOpenSettings} />
+
+        <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 pb-12 pt-10 sm:px-6 sm:pt-12 lg:px-8">
+          <h1 className="sr-only">CommandSense spoken command recognition</h1>
+
+          <div className="flex justify-center">
+            <ModeToggle mode={mode} onModeChange={handleModeChange} />
+          </div>
+
+          <div className="mt-8 flex flex-1 flex-col">
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.div
+                key={mode}
+                initial={{ opacity: 0, y: 18 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -12 }}
+                transition={{ duration: 0.3, ease: "easeOut" }}
+                className="w-full"
+              >
+                {mode === "continuous" ? (
+                  <ContinuousVisualizer
+                    ref={continuousRef}
+                    isListening={isListening}
+                    onToggleListening={handleToggleListening}
+                  />
+                ) : (
+                  <SingleOscilloscope
+                    isCapturing={isCapturing}
+                    onToggleCapture={handleToggleCapture}
+                  />
+                )}
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </main>
+
+        <SettingsModal
+          open={settingsOpen}
+          microphones={MICROPHONES}
+          selectedMicrophoneId={microphoneId}
+          onMicrophoneChange={setMicrophoneId}
+          onClearHistory={handleClearHistory}
+          onClose={handleCloseSettings}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      </div>
+    </MotionConfig>
   );
 }
+
