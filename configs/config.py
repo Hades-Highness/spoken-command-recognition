@@ -2,7 +2,7 @@ import torch
 from pathlib import Path
 
 MODEL_NAME = "CommandSense"
-MODEL_VERSION = "v4.0"
+MODEL_VERSION = "v4.1"
 NUM_CLASSES = 37
 
 BASE_DIR = Path(__file__).resolve().parent.parent
