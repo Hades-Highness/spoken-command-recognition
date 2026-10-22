@@ -88,6 +88,7 @@ INT16_SCALE = 32767.0
 EXPECTED_CHANNELS = 3
 EXPECTED_FRAMES = TARGET_SAMPLES // HOP_LENGTH + 1  # 63 frames for 1.0 s
 EXPECTED_SHAPE = (1, EXPECTED_CHANNELS, N_MELS, EXPECTED_FRAMES)
+BAKED_SHAPE = (1, WINDOW_SAMPLES)  # a graph with the front-end baked in takes this
 
 
 class SetupError(RuntimeError):
@@ -180,15 +181,30 @@ class AudioRingBuffer:
 
 
 class FeatureFrontend:
-    """Training-identical waveform to ``[1, 3, 64, 63]`` mel conversion."""
+    """Turns one 1.0 s window into whatever the graph declares.
 
-    def __init__(self):
-        self._transform = AudioToThreeChannelMel(n_mels=N_MELS)
-        self._transform.eval()
-        if hasattr(self._transform, "augment"):
-            self._transform.augment = False
+    Two contracts exist in the releases, and the graph's input rank picks one:
+    ``export_onnx.py`` bakes the mel/delta front-end into the shipped graph, so
+    that artifact takes the ``[1, WINDOW_SAMPLES]`` window itself; the v3.x and
+    v4.0 graphs take the training-identical ``[1, 3, 64, 63]`` features. Both
+    paths share the same int16 gridding, so a baked graph sees exactly the
+    samples the in-process transform would have produced features from.
 
-    def __call__(self, waveform: np.ndarray) -> np.ndarray:
+    With ``baked=True`` no torchaudio transform is constructed at all: the
+    microphone window goes to the session untouched (beyond the gridding).
+    """
+
+    def __init__(self, baked: bool = False):
+        self.baked = bool(baked)
+        self._transform = None
+        if not self.baked:
+            self._transform = AudioToThreeChannelMel(n_mels=N_MELS)
+            self._transform.eval()
+            if hasattr(self._transform, "augment"):
+                self._transform.augment = False
+
+    def waveform(self, waveform: np.ndarray) -> np.ndarray:
+        """``[1, WINDOW_SAMPLES]`` float32 on the training cache's int16 grid."""
         samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
         if samples.size != WINDOW_SAMPLES:
             raise ValueError(f"Expected {WINDOW_SAMPLES} samples, got {samples.size}.")
@@ -196,21 +212,31 @@ class FeatureFrontend:
             samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
         samples = np.clip(samples, -1.0, 1.0)
         samples = np.round(samples * INT16_SCALE).astype(np.float32)
+        return samples.reshape(1, WINDOW_SAMPLES)
 
-        with torch.inference_mode():
-            tensor = torch.from_numpy(samples.copy()).unsqueeze(0)
-            features = self._transform(tensor)
-            batch = features.detach().cpu().numpy().astype(np.float32)
+    def __call__(self, waveform: np.ndarray) -> np.ndarray:
+        samples = self.waveform(waveform)
+        if self.baked:
+            batch = np.ascontiguousarray(samples)
+            expected = BAKED_SHAPE
+        else:
+            with torch.inference_mode():
+                tensor = torch.from_numpy(samples.copy()).unsqueeze(0)
+                features = self._transform(tensor)
+            batch = np.ascontiguousarray(
+                features.detach().cpu().numpy().astype(np.float32)
+            )
+            expected = EXPECTED_SHAPE
 
-        if batch.shape != EXPECTED_SHAPE:
+        if batch.shape != expected:
             raise SetupError(
-                f"Unexpected input shape {tuple(batch.shape)}; the model expects {EXPECTED_SHAPE}."
+                f"Unexpected input shape {tuple(batch.shape)}; the model expects {expected}."
             )
         if not np.isfinite(batch).all():
             raise SetupError(
                 "Feature extraction produced non-finite values; the input is unusable."
             )
-        return np.ascontiguousarray(batch)
+        return batch
 
 
 class OnnxKeywordSpotter:
@@ -220,6 +246,10 @@ class OnnxKeywordSpotter:
     real-time loop and the single-recording tab execute the very same graph.
     ``session.run`` is serialized by the runtime lock because both tabs can
     classify concurrently.
+
+    The graph's declared input rank decides which payload :meth:`predict`
+    expects, and the caller reads :attr:`bakes_frontend` to know whether
+    :class:`FeatureFrontend` has to run the mel transform.
     """
 
     def __init__(
@@ -235,7 +265,13 @@ class OnnxKeywordSpotter:
         self.labels = list(labels)
         self.temperature = float(temperature)
         self.threshold = float(threshold)
+        self.input_rank = 0
         self._validate_io()
+
+    @property
+    def bakes_frontend(self) -> bool:
+        """True when the graph takes raw audio, so no transform is needed."""
+        return self.input_rank == 2
 
     def _validate_io(self) -> None:
         inputs = self.session.get_inputs()
@@ -244,19 +280,33 @@ class OnnxKeywordSpotter:
                 f"The ONNX graph declares {len(inputs)} inputs; exactly one is expected."
             )
         declared = inputs[0].shape
-        if len(declared) != 4:
-            raise SetupError(f"The ONNX graph declares input shape {declared}; rank 4 is expected.")
-        channels = declared[1]
-        if isinstance(channels, int) and channels != EXPECTED_CHANNELS:
+        rank = len(declared)
+        if rank == 2:
+            samples = declared[-1]
+            if isinstance(samples, int) and samples != WINDOW_SAMPLES:
+                raise SetupError(
+                    f"The ONNX graph expects {samples} audio samples; "
+                    f"{WINDOW_SAMPLES} are expected. Re-export the model."
+                )
+        elif rank == 4:
+            channels = declared[1]
+            if isinstance(channels, int) and channels != EXPECTED_CHANNELS:
+                raise SetupError(
+                    f"The ONNX graph declares {channels} input channels; "
+                    f"{EXPECTED_CHANNELS} are expected."
+                )
+            frames = declared[3]
+            if isinstance(frames, int) and frames != EXPECTED_FRAMES:
+                raise SetupError(
+                    f"The ONNX graph expects {frames} time frames; "
+                    f"{EXPECTED_FRAMES} are expected."
+                )
+        else:
             raise SetupError(
-                f"The ONNX graph declares {channels} input channels; "
-                f"{EXPECTED_CHANNELS} are expected."
+                f"The ONNX graph declares input shape {declared}; rank 2 "
+                f"(raw audio) or rank 4 (features) is expected."
             )
-        frames = declared[3]
-        if isinstance(frames, int) and frames != EXPECTED_FRAMES:
-            raise SetupError(
-                f"The ONNX graph expects {frames} time frames; {EXPECTED_FRAMES} are expected."
-            )
+        self.input_rank = rank
         if inputs[0].name != self.input_name:
             raise SetupError(
                 f"The ONNX graph input is named '{inputs[0].name}', not '{self.input_name}'."
@@ -272,9 +322,13 @@ class OnnxKeywordSpotter:
                 f"{len(self.labels)} labels were loaded."
             )
 
-    def predict(self, features: np.ndarray) -> Tuple[str, float]:
-        """Return the top-1 label and its temperature-scaled probability."""
-        logits = self.session.run(None, {self.input_name: features})[0]
+    def predict(self, payload: np.ndarray) -> Tuple[str, float]:
+        """Return the top-1 label and its temperature-scaled probability.
+
+        ``payload`` is the window itself for a baked graph (rank 2 input) or the
+        3-channel features otherwise; :attr:`input_rank` says which.
+        """
+        logits = self.session.run(None, {self.input_name: payload})[0]
         logits = np.asarray(logits, dtype=np.float64).reshape(-1)
         if logits.size != len(self.labels):
             raise SetupError(
@@ -305,8 +359,7 @@ class SharedRuntime:
             raise SetupError(
                 f"[ERROR] Model {MODEL_NAME} {self.model_version} was not found. "
                 f"Download the release bundle from the GitHub Releases page ({RELEASES_URL}) "
-                "or generate it locally with 'python export_onnx.py' "
-                "(then 'python quantize_int8.py')."
+                "or generate it locally with 'python export_onnx.py'."
             ) from exc
         except Exception as exc:
             raise SetupError(
@@ -331,7 +384,6 @@ class SharedRuntime:
     def _initialise_onnx(self) -> None:
         try:
             session, input_name = self.engine.get_onnx_session()
-            self.frontend = FeatureFrontend()
             self.spotter = OnnxKeywordSpotter(
                 session=session,
                 input_name=input_name,
@@ -339,6 +391,9 @@ class SharedRuntime:
                 temperature=self.temperature,
                 threshold=self.threshold,
             )
+            # A baked graph takes the window directly, so its torchaudio
+            # transform is never built; an older feature graph still needs it.
+            self.frontend = FeatureFrontend(baked=self.spotter.bakes_frontend)
         except SetupError:
             raise
         except Exception as exc:
@@ -369,8 +424,7 @@ class SharedRuntime:
             raise SetupError(
                 f"[ERROR] No ONNX graph was found for {MODEL_NAME} {self.model_version}. "
                 f"Download the release bundle from the GitHub Releases page ({RELEASES_URL}) "
-                "or generate it locally with 'python export_onnx.py' "
-                "(then 'python quantize_int8.py')."
+                "or generate it locally with 'python export_onnx.py'."
             )
         if "onnx" not in self.engine.available_backends:
             raise SetupError(

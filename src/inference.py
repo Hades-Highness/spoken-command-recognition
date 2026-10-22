@@ -2,10 +2,18 @@
 
 Artifacts are resolved only from the configured ``MODEL_VERSION``: weights from
 ``checkpoints/model_<version>/<MODEL_NAME>_<version>.pth`` (canonical) or the
-legacy flat layout, and ONNX from the shipped INT8 graph first, then the float32
-reference, then the unsuffixed export. A release without any usable artifact
-raises :class:`ModelUnavailableError` with the expected paths and the releases
-URL instead of substituting a different version.
+legacy flat layout, and ONNX from the shipped INT8 graph first, then the
+unsuffixed export, then the float32 reference. A release without any usable
+artifact raises :class:`ModelUnavailableError` with the expected paths and the
+releases URL instead of substituting a different version.
+
+Two input contracts are supported, because both graphs exist in the releases:
+``export_onnx.py`` bakes the waveform front-end into the graph, so the shipped
+artifact takes ``raw_audio`` ``[batch, TARGET_SAMPLES]`` in [-1, 1] and needs no
+feature extraction at all, while the v3.x/v4.0 graphs take
+``[batch, 3, N_MELS, frames]`` features. The graph's declared input rank decides
+which one is fed (2 -> waveform, 4 -> features), so an older artifact keeps
+working unchanged.
 
 Both backends return raw logits, and ``softmax(logits / T)`` is applied in
 Python, so they score identically and changing ``T`` or ``tau`` never requires
@@ -33,14 +41,20 @@ from configs.config import (  # noqa: E402
     NUM_CLASSES,
     ONNX_DIR,
     REJECT_LABEL,
+    TARGET_SAMPLES,
     checkpoint_dir,
 )
 from src import calibration  # noqa: E402
 from src.models import AudioFeatureExtractor, CommandSense  # noqa: E402
-from src.utils import load_and_preprocess_audio  # noqa: E402
+from src.utils import (  # noqa: E402
+    extract_features,
+    load_audio_file,
+    prepare_waveform,
+)
 
 EXPECTED_CHANNELS = 3
 EXPECTED_TIME_FRAMES = 63
+EXPECTED_SAMPLES = TARGET_SAMPLES
 
 # Where the self-contained release bundle (weights, ONNX graphs, calibration) is
 # published; quoted by the errors raised when an artifact of MODEL_VERSION is absent.
@@ -111,6 +125,7 @@ class CommandInferencer:
 
         self._onnx_session = None
         self._onnx_input_name = None
+        self._onnx_input_rank = None
         self._torch_model = None
 
         self.available_backends = ["pytorch"]
@@ -123,9 +138,11 @@ class CommandInferencer:
                 f"Cannot find the {MODEL_NAME} {self.version} model files for the "
                 f"configured MODEL_VERSION. Looked for "
                 f"'{expected_dir}/{MODEL_NAME}_{self.version}.pth' and "
-                f"'{expected_dir}/{MODEL_NAME}_{self.version}_int8.onnx' "
-                f"(or the '{MODEL_NAME}_{self.version}_fp32.onnx' float32 reference). "
-                f"Download the release bundle from the GitHub Releases page "
+                f"'{expected_dir}/{MODEL_NAME}_{self.version}.onnx' "
+                f"(or the '{MODEL_NAME}_{self.version}_int8.onnx' / "
+                f"'{MODEL_NAME}_{self.version}_fp32.onnx' graphs). "
+                f"Rebuild them with 'python export_onnx.py', or download the "
+                f"release bundle from the GitHub Releases page "
                 f"({RELEASES_URL}) and place the {self.version} artifacts in "
                 f"'{expected_dir}'."
             )
@@ -239,18 +256,19 @@ class CommandInferencer:
     def _resolve_onnx(self):
         """Path of the ONNX graph of ``self.version``, or ``None``.
 
-        The shipped deployment artifact is the INT8 graph, so
-        ``<MODEL_NAME>_<version>_int8.onnx`` is preferred, then the float32 reference
-        ``<MODEL_NAME>_<version>_fp32.onnx`` written by ``quantize_int8.py``, then the
-        unsuffixed ``<MODEL_NAME>_<version>.onnx`` that ``export_onnx.py`` writes.
-        Each name is probed in the version's checkpoint folder first, then the legacy
-        flat checkpoint folder and ``onnx/``. As in :meth:`_resolve_checkpoint`, no
-        other release is ever substituted.
+        The shipped deployment artifact is the quantized graph, so
+        ``<MODEL_NAME>_<version>_int8.onnx`` (an older release's quantized copy)
+        is preferred, then the unsuffixed ``<MODEL_NAME>_<version>.onnx`` that
+        ``export_onnx.py`` writes today (front-end baked in, INT8), then the
+        ``<MODEL_NAME>_<version>_fp32.onnx`` reference written next to it.
+        Each name is probed in the version's checkpoint folder first, then the
+        legacy flat checkpoint folder and ``onnx/``. As in
+        :meth:`_resolve_checkpoint`, no other release is ever substituted.
         """
         names = [
             f"{MODEL_NAME}_{self.version}_int8.onnx",
-            f"{MODEL_NAME}_{self.version}_fp32.onnx",
             f"{MODEL_NAME}_{self.version}.onnx",
+            f"{MODEL_NAME}_{self.version}_fp32.onnx",
         ]
         for directory in (checkpoint_dir(self.version), CHECKPOINT_DIR, ONNX_DIR):
             for name in names:
@@ -312,10 +330,10 @@ class CommandInferencer:
         if self.onnx_path is None:
             raise FileNotFoundError(
                 f"ONNX model for {MODEL_NAME} {self.version} was not found. "
-                f"Download '{MODEL_NAME}_{self.version}_int8.onnx' (or the "
-                f"'{MODEL_NAME}_{self.version}_fp32.onnx' reference) into "
-                f"'{checkpoint_dir(self.version)}' from the release bundle at "
-                f"{RELEASES_URL}, or export that version with "
+                f"Download '{MODEL_NAME}_{self.version}.onnx' (the INT8 deployment "
+                f"graph) or '{MODEL_NAME}_{self.version}_fp32.onnx' (the float32 "
+                f"reference) into '{checkpoint_dir(self.version)}' from the release "
+                f"bundle at {RELEASES_URL}, or export that version with "
                 "'python export_onnx.py'."
             )
 
@@ -329,29 +347,66 @@ class CommandInferencer:
         session = ort.InferenceSession(self.onnx_path, providers=providers)
         input_meta = session.get_inputs()[0]
         declared = input_meta.shape
+        rank = len(declared)
 
-        if len(declared) != 4:
+        if rank == 2:
+            # Baked front-end: the graph takes the waveform itself.
+            declared_samples = declared[-1]
+            if isinstance(declared_samples, int) and declared_samples != EXPECTED_SAMPLES:
+                raise ValueError(
+                    f"ONNX model '{self.onnx_path}' expects {declared_samples} audio "
+                    f"samples but each clip is {EXPECTED_SAMPLES}. "
+                    "Re-export the model with 'python export_onnx.py'."
+                )
+            contract = "raw audio, front-end baked in"
+        elif rank == 4:
+            # Feature graph (v3.x / v4.0): the front-end runs in this process.
+            declared_channels = declared[1]
+            if declared_channels not in (EXPECTED_CHANNELS, "3"):
+                raise ValueError(
+                    f"ONNX model '{self.onnx_path}' declares {declared_channels} input "
+                    f"channels but this pipeline builds {EXPECTED_CHANNELS}. "
+                    "Re-export the model with 'python export_onnx.py'."
+                )
+            declared_frames = declared[3]
+            if isinstance(declared_frames, int) and declared_frames != EXPECTED_TIME_FRAMES:
+                raise ValueError(
+                    f"ONNX model '{self.onnx_path}' expects {declared_frames} time frames "
+                    f"but the feature pipeline produces {EXPECTED_TIME_FRAMES}. "
+                    "This export is stale; re-export it."
+                )
+            contract = "features, extracted in-process"
+        else:
             raise ValueError(
-                f"ONNX model '{self.onnx_path}' has an unexpected input rank: {declared}."
-            )
-        declared_channels = declared[1]
-        if declared_channels not in (EXPECTED_CHANNELS, "3"):
-            raise ValueError(
-                f"ONNX model '{self.onnx_path}' declares {declared_channels} input "
-                f"channels but this pipeline builds {EXPECTED_CHANNELS}. "
-                "Re-export the model with 'python export_onnx.py'."
-            )
-        declared_frames = declared[3]
-        if isinstance(declared_frames, int) and declared_frames != EXPECTED_TIME_FRAMES:
-            raise ValueError(
-                f"ONNX model '{self.onnx_path}' expects {declared_frames} time frames "
-                f"but the feature pipeline produces {EXPECTED_TIME_FRAMES}. "
-                "This export is stale; re-export it."
+                f"ONNX model '{self.onnx_path}' has an unexpected input rank: {declared}. "
+                f"Expected rank 2 '[batch, {EXPECTED_SAMPLES}]' (raw audio) or rank 4 "
+                f"'[batch, {EXPECTED_CHANNELS}, N_MELS, {EXPECTED_TIME_FRAMES}]' "
+                "(features)."
             )
 
         self._onnx_session = session
         self._onnx_input_name = input_meta.name
-        print(f"[+] Loaded ONNX Runtime session <- {self.onnx_path} (input {declared})")
+        self._onnx_input_rank = rank
+        print(
+            f"[+] Loaded ONNX Runtime session <- {self.onnx_path} "
+            f"(input {declared}, {contract})"
+        )
+
+    def _features(self, waveform):
+        """3-channel features of one ``[1, TARGET_SAMPLES]`` waveform, checked.
+
+        Only the rank-4 contract needs this; for a baked graph the waveform goes
+        straight to the session and torchaudio is not touched.
+        """
+        features = extract_features(
+            waveform, device=self.device, extractor=self.feature_extractor
+        )
+        if features.shape[1] != EXPECTED_CHANNELS:
+            raise ValueError(
+                f"Expected {EXPECTED_CHANNELS}-channel features, got shape "
+                f"{tuple(features.shape)}."
+            )
+        return features
 
     def get_onnx_session(self):
         """Return the cached ``(session, input_name)`` of the ONNX graph.
@@ -375,6 +430,11 @@ class CommandInferencer:
     ) -> dict:
         """Classify one audio file.
 
+        The file is decoded once, resampled/downmixed/fitted to
+        ``TARGET_SAMPLES``, and the graph's own input rank then decides what is
+        fed: the waveform itself for a baked-front-end artifact, or the 3-channel
+        features for a v3.x/v4.0 graph.
+
         The logits of the selected backend are rescaled by ``T`` before the
         softmax, then the top-1 probability is compared with ``tau``.
 
@@ -391,13 +451,7 @@ class CommandInferencer:
                 temperature=temperature, confidence_threshold=confidence_threshold
             )
 
-        features = load_and_preprocess_audio(
-            audio_path, device=self.device, extractor=self.feature_extractor
-        )
-        if features.shape[1] != EXPECTED_CHANNELS:
-            raise ValueError(
-                f"Expected {EXPECTED_CHANNELS}-channel features, got shape {tuple(features.shape)}."
-            )
+        waveform = prepare_waveform(*load_audio_file(audio_path))
 
         choice = str(backend).lower()
         if choice in ("pytorch", "pth", ".pth"):
@@ -409,11 +463,16 @@ class CommandInferencer:
 
         if use_onnx:
             self._load_onnx()
+            if self._onnx_input_rank == 2:
+                payload = waveform.numpy()
+            else:
+                payload = self._features(waveform).cpu().numpy()
             logits = self._onnx_session.run(
-                None, {self._onnx_input_name: features.cpu().numpy()}
+                None, {self._onnx_input_name: payload}
             )[0]
         else:
             self._load_pytorch()
+            features = self._features(waveform)
             with torch.no_grad():
                 logits = self._torch_model(features).cpu().numpy()
 
