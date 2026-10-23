@@ -32,13 +32,13 @@ silently.
 - `src/components/ListenMode.tsx` owns the session state; the visualizer is
   presentational and only receives the detection history.
 - `src/components/AnalyzeMode.tsx` records one short microphone sample,
-  displays its live and recorded audio waveform, and supports playback and
-  re-recording.
-  Single-shot analysis resamples the recording to 16 kHz, removes leading and
-  trailing silence, centers the spoken segment in the model's one-second input
-  window, and runs the same calibrated inference as listen mode. Microphone
-  selection and the temperature (`T`) and confidence threshold (`tau`) can be
-  adjusted in Settings. Audio is processed locally in the browser.
+  accepts uploaded audio files, displays its live and recorded audio waveform,
+  and supports playback and re-recording.
+  Single-shot analysis resamples audio to 16 kHz, removes leading and trailing
+  silence, centers the spoken segment in the model's one-second input window,
+  and runs the same calibrated inference as listen mode. Microphone selection
+  and the temperature (`T`) and confidence threshold (`tau`) can be adjusted in
+  Settings. Audio is processed locally in the browser.
 
 ### Detections
 

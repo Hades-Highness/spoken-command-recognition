@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import type { CalibrationSettings } from "@/lib/onnxInference";
 
@@ -16,9 +16,10 @@ type SettingsModalProps = {
   onMicrophoneChange: (deviceId: string) => void;
   microphoneError: string | null;
   isLoadingMicrophones: boolean;
-  onRefreshMicrophones: () => void;
+  onRefreshMicrophones: () => Promise<void>;
   calibration: CalibrationSettings;
   onCalibrationChange: (calibration: CalibrationSettings) => void;
+  onResetCalibration: () => void;
   onClearHistory: () => void;
   onClose: () => void;
 };
@@ -33,10 +34,25 @@ export default function SettingsModal({
   onRefreshMicrophones,
   calibration,
   onCalibrationChange,
+  onResetCalibration,
   onClearHistory,
   onClose,
 }: SettingsModalProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const [microphoneMenuOpen, setMicrophoneMenuOpen] = useState(false);
+
+  const handleClose = useCallback(() => {
+    setMicrophoneMenuOpen(false);
+    onClose();
+  }, [onClose]);
+
+  const toggleMicrophoneMenu = () => {
+    const willOpen = !microphoneMenuOpen;
+    setMicrophoneMenuOpen(willOpen);
+    if (willOpen) {
+      void onRefreshMicrophones();
+    }
+  };
 
   useEffect(() => {
     if (!open) {
@@ -45,7 +61,7 @@ export default function SettingsModal({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onClose();
+        handleClose();
       }
     };
 
@@ -63,7 +79,7 @@ export default function SettingsModal({
       window.removeEventListener("keydown", handleKeyDown);
       previouslyFocused?.focus();
     };
-  }, [open, onClose]);
+  }, [open, handleClose]);
 
   return (
     <AnimatePresence>
@@ -79,7 +95,7 @@ export default function SettingsModal({
           <button
             type="button"
             aria-label="Close settings"
-            onClick={onClose}
+            onClick={handleClose}
             className="absolute inset-0 h-full w-full cursor-default bg-black/70 backdrop-blur-sm"
           />
 
@@ -109,7 +125,7 @@ export default function SettingsModal({
               <button
                 type="button"
                 ref={closeButtonRef}
-                onClick={onClose}
+                onClick={handleClose}
                 aria-label="Close settings"
                 className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 text-text-muted transition-colors hover:border-primary/60 hover:text-text-main focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
               >
@@ -138,55 +154,90 @@ export default function SettingsModal({
                 </label>
 
                 <div className="relative mt-2">
-                  <select
+                  <button
                     id="microphone-select"
-                    value={selectedMicrophoneId}
-                    onChange={(event) =>
-                      onMicrophoneChange(event.target.value)
-                    }
-                    className="w-full appearance-none rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 pr-9 text-sm text-text-main transition-colors hover:border-white/20 focus:border-primary/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
+                    type="button"
+                    aria-haspopup="listbox"
+                    aria-expanded={microphoneMenuOpen}
+                    onClick={toggleMicrophoneMenu}
+                    className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-left text-sm text-text-main transition-colors hover:border-white/20 focus:border-primary/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
                   >
-                    {microphones.length > 0 ? (
-                      microphones.map((microphone) => (
-                        <option
-                          key={microphone.deviceId}
-                          value={microphone.deviceId}
-                        >
-                          {microphone.label}
-                        </option>
-                      ))
+                    <span className="truncate">
+                      {microphones.find(
+                        (microphone) =>
+                          microphone.deviceId === selectedMicrophoneId,
+                      )?.label ?? "System default microphone"}
+                    </span>
+                    {isLoadingMicrophones ? (
+                      <span
+                        aria-hidden="true"
+                        className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-white/20 border-t-primary-hover"
+                      />
                     ) : (
-                      <option value="default">System default microphone</option>
+                      <svg
+                        aria-hidden="true"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={`h-4 w-4 shrink-0 text-text-muted transition-transform ${
+                          microphoneMenuOpen ? "rotate-180" : ""
+                        }`}
+                      >
+                        <path d="M6 9l6 6 6-6" />
+                      </svg>
                     )}
-                  </select>
+                  </button>
 
-                  <svg
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted"
-                  >
-                    <path d="M6 9l6 6 6-6" />
-                  </svg>
+                  {microphoneMenuOpen && (
+                    <div
+                      role="listbox"
+                      aria-labelledby="microphone-select"
+                      className="absolute left-0 right-0 z-10 mt-2 max-h-52 overflow-y-auto rounded-xl border border-white/10 bg-[#171717]/95 p-1.5 shadow-xl backdrop-blur-xl"
+                    >
+                      {isLoadingMicrophones ? (
+                        <p className="px-3 py-2.5 text-sm text-text-muted">
+                          Searching available microphones…
+                        </p>
+                      ) : microphones.map((microphone) => (
+                        <button
+                          key={microphone.deviceId}
+                          type="button"
+                          role="option"
+                          aria-selected={
+                            microphone.deviceId === selectedMicrophoneId
+                          }
+                          onClick={() => {
+                            onMicrophoneChange(microphone.deviceId);
+                            setMicrophoneMenuOpen(false);
+                          }}
+                          className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover ${
+                            microphone.deviceId === selectedMicrophoneId
+                              ? "bg-primary/15 text-text-main"
+                              : "text-text-muted hover:bg-white/[0.06] hover:text-text-main"
+                          }`}
+                        >
+                          <span className="truncate">{microphone.label}</span>
+                          {microphone.deviceId === selectedMicrophoneId && (
+                            <span
+                              aria-hidden="true"
+                              className="text-primary-hover"
+                            >
+                              ✓
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <p className="mt-2 text-xs leading-5 text-text-muted">
-                  Allow microphone access to load available input devices.
+                  The available devices are refreshed whenever you open this
+                  list.
                 </p>
-                <button
-                  type="button"
-                  onClick={onRefreshMicrophones}
-                  disabled={isLoadingMicrophones}
-                  className="mt-3 inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-xs font-medium text-text-main transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover disabled:cursor-progress disabled:opacity-50"
-                >
-                  {isLoadingMicrophones
-                    ? "Loading microphones…"
-                    : "Detect microphones"}
-                </button>
                 {microphoneError && (
                   <p role="alert" className="mt-2 text-xs text-primary-hover">
                     {microphoneError}
@@ -202,7 +253,6 @@ export default function SettingsModal({
                   Applied to both listening modes. T controls probability
                   calibration; tau sets the minimum confidence for acceptance.
                 </p>
-
                 <label
                   htmlFor="temperature-setting"
                   className="mt-4 flex items-center justify-between text-xs text-text-muted"
@@ -252,7 +302,15 @@ export default function SettingsModal({
                   }
                   className="mt-2 w-full accent-primary-hover"
                 />
+                <button
+                  type="button"
+                  onClick={onResetCalibration}
+                  className="mt-3 w-full inline-flex items-center justify-center rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-text-muted transition-colors hover:border-primary/60 hover:text-text-main focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
+                >
+                  Reset to defaults
+                </button>
               </div>
+              
 
               <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
                 <p className="text-sm font-medium text-text-main">History</p>
@@ -264,7 +322,7 @@ export default function SettingsModal({
                 <button
                   type="button"
                   onClick={onClearHistory}
-                  className="mt-3 inline-flex items-center justify-center rounded-full border border-primary/40 px-4 py-2 text-xs font-medium text-primary-hover transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
+                  className="mt-3 w-full inline-flex items-center justify-center rounded-full border border-primary/40 px-4 py-2 text-xs font-medium text-primary-hover transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover"
                 >
                   Clear history
                 </button>
@@ -278,7 +336,7 @@ export default function SettingsModal({
 
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleClose}
                 className="inline-flex items-center justify-center rounded-full bg-primary px-5 py-2 text-sm font-medium text-text-main transition-colors hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-2 focus-visible:ring-offset-[#111111]"
               >
                 Done

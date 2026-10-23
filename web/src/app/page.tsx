@@ -62,13 +62,18 @@ export default function Home() {
     setMicrophoneError(null);
     let temporaryStream: MediaStream | null = null;
     try {
-      temporaryStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
-      const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
+      let inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
         (device) => device.kind === "audioinput",
       );
+      if (inputs.some((device) => !device.label)) {
+        temporaryStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: false,
+        });
+        inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
+          (device) => device.kind === "audioinput",
+        );
+      }
       const options = [
         { deviceId: "default", label: "System default microphone" },
         ...inputs
@@ -149,9 +154,15 @@ export default function Home() {
           onMicrophoneChange={setMicrophoneId}
           microphoneError={microphoneError}
           isLoadingMicrophones={isLoadingMicrophones}
-          onRefreshMicrophones={() => void handleRefreshMicrophones()}
+          onRefreshMicrophones={handleRefreshMicrophones}
           calibration={calibration}
           onCalibrationChange={setCalibration}
+          onResetCalibration={() =>
+            setCalibration({
+              temperature: TEMPERATURE,
+              confidenceThreshold: CONFIDENCE_THRESHOLD,
+            })
+          }
           onClearHistory={handleClearHistory}
           onClose={handleCloseSettings}
         />

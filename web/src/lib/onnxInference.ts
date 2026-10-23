@@ -110,16 +110,20 @@ async function loadOrtRuntime(): Promise<OrtModule> {
     ortModulePromise = import("onnxruntime-web/wasm")
       .then((module) => {
         const ort = module as unknown as OrtModule;
-        // The threaded artefacts live in public/ort, see
-        // scripts/copy-ort-runtime.mjs.
+        const isMobile = 
+  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
+  window.innerWidth < 768;
+
         ort.env.wasm.wasmPaths = "/ort/";
-        // numThreads stays at the runtime default so the worker pool of
-        // ort-wasm-simd-threaded.wasm is used. That backend needs a
-        // SharedArrayBuffer, which the browser only exposes while the document is
-        // cross-origin isolated; web/next.config.ts sends the COOP and COEP
-        // headers that enable it. If isolation is ever lost, ONNX Runtime Web
-        // detects the missing SharedArrayBuffer and reduces itself to one thread.
         ort.env.logLevel = "error";
+
+        if (isMobile) {
+          ort.env.wasm.numThreads = 1;
+          ort.env.wasm.proxy = false;
+          console.log("[ONNX] Mobile browser detected. Using single-threaded WASM for stability.");
+        } else {
+          console.log("[ONNX] Desktop browser detected. Using multithreaded WASM.");
+        }
         return ort;
       })
       .catch((error: unknown) => {

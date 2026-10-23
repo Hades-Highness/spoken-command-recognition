@@ -142,7 +142,7 @@ export default function ListenVisualizer({
 
       <aside
         aria-labelledby="history-heading"
-        className="flex w-full shrink-0 flex-col border-t border-white/10 px-2 sm:px-4 py-4 sm:w-[160px] sm:border-l sm:border-t-0 sm:py-6"
+        className="flex w-full shrink-0 flex-col border-t border-white/10 px-2 sm:px-4 py-4 sm:w-[200px] sm:border-l sm:border-t-0 sm:py-6"
       >
         <h2
           id="history-heading"

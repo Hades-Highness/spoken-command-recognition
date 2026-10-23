@@ -32,6 +32,7 @@ export default function AnalyzeMode({
   const [status, setStatus] = useState<CaptureStatus>("empty");
   const [audio, setAudio] = useState<Float32Array | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioName, setAudioName] = useState<string | null>(null);
   const [result, setResult] = useState<InferenceResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -46,6 +47,7 @@ export default function AnalyzeMode({
   const animationFrameRef = useRef<number | null>(null);
   const recordingStartedAtRef = useRef(0);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -214,6 +216,7 @@ export default function AnalyzeMode({
             }
             setAudio(recordedAudio);
             setAudioUrl(URL.createObjectURL(recording));
+            setAudioName("Microphone recording");
             setStatus("ready");
           })
           .catch((error: unknown) => {
@@ -264,6 +267,37 @@ export default function AnalyzeMode({
     }
     if (recorderRef.current?.state === "recording") {
       recorderRef.current.stop();
+    }
+  };
+
+  const handleAudioUpload = async (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+
+    setErrorMessage(null);
+    setResult(null);
+    setIsAnalyzing(false);
+    setStatus("processing");
+    try {
+      const decodedAudio = await decodeRecording(file);
+      if (!mountedRef.current) {
+        return;
+      }
+      setAudio(decodedAudio);
+      setAudioUrl(URL.createObjectURL(file));
+      setAudioName(file.name);
+      setStatus("ready");
+    } catch (error) {
+      if (!mountedRef.current) {
+        return;
+      }
+      setStatus(audio ? "ready" : "error");
+      setErrorMessage(
+        error instanceof Error
+          ? `The audio file could not be opened: ${error.message}`
+          : "The audio file could not be opened.",
+      );
     }
   };
 
@@ -450,7 +484,7 @@ export default function AnalyzeMode({
       {audioUrl && (
         <div className="mt-4 rounded-xl border border-white/5 bg-white/[0.02] px-4 py-3">
           <p className="mb-2 text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted">
-            Listen to your recording
+            {audioName ?? "Listen to your audio"}
           </p>
           <audio
             key={audioUrl}
@@ -496,6 +530,31 @@ export default function AnalyzeMode({
       )}
 
       <div className="mt-6 flex flex-wrap justify-end gap-3">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="audio/*"
+          className="sr-only"
+          aria-label="Upload an audio file"
+          disabled={
+            status === "capturing" || status === "processing" || isAnalyzing
+          }
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            void handleAudioUpload(file);
+          }}
+        />
+        {status !== "capturing" && (
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={status === "processing" || isAnalyzing}
+            className="inline-flex items-center justify-center rounded-full border border-white/15 px-5 py-2.5 text-sm font-medium text-text-main transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {audio ? "Upload another audio" : "Upload audio"}
+          </button>
+        )}
         {audio && status !== "capturing" && (
           <>
             <button
