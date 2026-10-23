@@ -2,11 +2,6 @@
 data/
 logs/
 checkpoints/
-onnx/
-*.pth
-*.pt
-*.ckpt
-*.onnx
 
 # Python & Caches
 __pycache__/
