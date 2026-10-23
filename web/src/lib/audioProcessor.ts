@@ -3,11 +3,12 @@ import {
   SAMPLE_RATE,
   WINDOW_SAMPLES,
   runInference,
+  type CalibrationSettings,
   type InferenceResult,
 } from "./onnxInference";
 
 /**
- * Microphone capture and 16 kHz resampling for the continuous mode.
+ * Microphone capture and 16 kHz resampling for the listen mode.
  *
  * Browsers hand us audio at the hardware rate (44.1 or 48 kHz) and will not
  * decimate by an integer factor, so the graph is:
@@ -130,6 +131,9 @@ export type AudioProcessorOptions = {
   deviceId?: string;
   /** Called once per inference window while the session is running. */
   onResult: (result: InferenceResult) => void;
+  /** Called for each captured audio chunk with its normalized signal level. */
+  onAudioLevel?: (level: number) => void;
+  calibration?: CalibrationSettings;
   /** Called after the session stops because of an unrecoverable error. */
   onError?: (error: Error) => void;
 };
@@ -202,6 +206,10 @@ export class AudioProcessor {
 
   private readonly onResult: (result: InferenceResult) => void;
 
+  private readonly onAudioLevel?: (level: number) => void;
+
+  private calibration?: CalibrationSettings;
+
   private readonly onError?: (error: Error) => void;
 
   private context: AudioContext | null = null;
@@ -230,11 +238,17 @@ export class AudioProcessor {
   constructor(options: AudioProcessorOptions) {
     this.deviceId = options.deviceId;
     this.onResult = options.onResult;
+    this.onAudioLevel = options.onAudioLevel;
+    this.calibration = options.calibration;
     this.onError = options.onError;
   }
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  setCalibration(calibration: CalibrationSettings): void {
+    this.calibration = calibration;
   }
 
   /** Requests the microphone and starts the 0.5 s classification loop. */
@@ -361,6 +375,8 @@ export class AudioProcessor {
         }
       }
     }
+
+    this.onAudioLevel?.(0);
   }
 
   /** Buffers a downsampled chunk and classifies every completed window. */
@@ -368,6 +384,13 @@ export class AudioProcessor {
     if (!this.running) {
       return;
     }
+
+    let squaredTotal = 0;
+    for (const sample of samples) {
+      squaredTotal += sample * sample;
+    }
+    const rms = Math.sqrt(squaredTotal / samples.length);
+    this.onAudioLevel?.(Math.min(1, Math.max(0, (rms - 0.004) * 12)));
 
     let offset = 0;
     while (offset < samples.length) {
@@ -396,7 +419,7 @@ export class AudioProcessor {
     const generation = this.generation;
     this.inFlight = true;
     try {
-      const result = await runInference(window);
+      const result = await runInference(window, this.calibration);
       // Ignore results that finish after stop()/start() so a stale window can
       // never land in a new session's history.
       if (this.running && this.generation === generation) {

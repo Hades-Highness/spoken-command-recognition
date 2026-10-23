@@ -1,8 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
+import type { CSSProperties } from "react";
 
-const WAVE_BAR_HEIGHTS = [18, 34, 54, 30, 70, 46, 26, 58, 38, 22];
+const CIRCULAR_WAVE_BARS = Array.from({ length: 48 }, (_, index) => ({
+  angle: (index / 48) * 360,
+  height: 7 + ((Math.sin(index * 1.73) + 1) / 2) * 9,
+  amplitude: 0.45 + ((Math.sin(index * 0.61) + 1) / 2) * 0.55,
+}));
 
 export type HistoryEntry = {
   id: string;
@@ -13,10 +18,12 @@ export type HistoryEntry = {
   timestamp: string;
 };
 
-type ContinuousVisualizerProps = {
+type ListenVisualizerProps = {
   isListening: boolean;
   /** True while the model is loading or the microphone is opening. */
   isBusy: boolean;
+  /** Normalized microphone signal level in the 0..1 range. */
+  audioLevel: number;
   /** One-line explanation of the current state. */
   statusMessage: string;
   /** Replaces the status line when the session failed. */
@@ -26,25 +33,26 @@ type ContinuousVisualizerProps = {
   onToggleListening: () => void;
 };
 
-export default function ContinuousVisualizer({
+export default function ListenVisualizer({
   isListening,
   isBusy,
+  audioLevel,
   statusMessage,
   errorMessage,
   history,
   onToggleListening,
-}: ContinuousVisualizerProps) {
+}: ListenVisualizerProps) {
   return (
     <section
-      aria-label="Continuous listening"
+      aria-label="Listen listening"
       className="flex w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#111111] sm:flex-row"
     >
       <div className="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-6 px-2 py-10 sm:gap-8 sm:px-4 sm:py-12">
         <p className="absolute left-4 top-4 text-[10px] font-medium uppercase tracking-[0.22em] text-text-muted sm:left-6 sm:top-6">
-          Continuous
+          Listen Mode
         </p>
 
-        <div className="relative flex h-28 w-28 items-center justify-center sm:h-52 sm:w-52">
+        <div className="relative flex h-40 w-40 items-center justify-center sm:h-64 sm:w-64">
           <span
             aria-hidden="true"
             className={`absolute inset-0 rounded-full border border-primary/20 transition-opacity duration-500 ${
@@ -61,6 +69,23 @@ export default function ContinuousVisualizer({
               isListening ? "opacity-100" : "opacity-0"
             }`}
           />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 [--wave-radius:61px] sm:[--wave-radius:101px]"
+            style={{ "--audio-level": audioLevel } as CSSProperties}
+          >
+            {CIRCULAR_WAVE_BARS.map((bar, index) => (
+              <span
+                key={index}
+                className="absolute left-1/2 top-1/2 w-[2px] rounded-full bg-gradient-to-t from-primary/50 to-primary-hover transition-[transform,opacity] duration-100 motion-reduce:transition-none sm:w-[3px]"
+                style={{
+                  height: `${bar.height}px`,
+                  opacity: isListening ? 0.35 + audioLevel * 0.65 : 0.2,
+                  transform: `translate(-50%, -50%) rotate(${bar.angle}deg) translateY(calc(-1 * var(--wave-radius))) scaleY(calc(${bar.amplitude} * (0.25 + var(--audio-level, 0) * 2.4)))`,
+                }}
+              />
+            ))}
+          </div>
 
           <button
             type="button"
@@ -72,13 +97,13 @@ export default function ContinuousVisualizer({
               isBusy
                 ? "Preparing the recognition session"
                 : isListening
-                  ? "Stop continuous listening"
-                  : "Start continuous listening"
+                  ? "Stop listen listening"
+                  : "Start listen listening"
             }
-            className={`relative flex h-20 w-20 items-center justify-center rounded-full border transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-4 focus-visible:ring-offset-background disabled:cursor-progress sm:h-36 sm:w-36 ${
+            className={`relative z-10 flex h-20 w-20 items-center justify-center rounded-full border backdrop-blur-md transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-4 focus-visible:ring-offset-background disabled:cursor-progress sm:h-36 sm:w-36 ${
               isListening
                 ? "border-primary-hover bg-primary/20 shadow-[0_0_60px_-10px_rgba(249,43,53,0.65)]"
-                : "border-white/15 bg-white/[0.04] hover:border-primary/60 hover:bg-primary/10"
+                : "border-white/15 bg-[#111111]/45 hover:border-primary/60 hover:bg-primary/10"
             }`}
           >
             <span
@@ -102,7 +127,7 @@ export default function ContinuousVisualizer({
             ? "Preparing the model"
             : isListening
               ? "Speak a command"
-              : "Start a continuous session"}
+              : "Start a listen session"}
         </h2>
 
         <p
@@ -113,24 +138,6 @@ export default function ContinuousVisualizer({
         >
           {errorMessage ?? statusMessage}
         </p>
-
-        <div
-          aria-hidden="true"
-          className="flex h-16 items-center justify-center gap-1 sm:h-20 sm:gap-1.5"
-        >
-          {WAVE_BAR_HEIGHTS.map((height, index) => (
-            <span
-              key={index}
-              className={`w-1 rounded-full bg-gradient-to-t from-primary/40 to-primary-hover transition-opacity duration-500 sm:w-1.5 ${
-                isListening ? "animate-pulse-slow" : "opacity-30"
-              }`}
-              style={{
-                height: `${height}px`,
-                animationDelay: `${index * 0.11}s`,
-              }}
-            />
-          ))}
-        </div>
       </div>
 
       <aside

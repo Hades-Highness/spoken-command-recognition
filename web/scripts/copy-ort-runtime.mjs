@@ -2,8 +2,10 @@
  * Copies the ONNX Runtime Web WASM artifacts into public/ort so the browser can
  * fetch them from a stable URL (ort.env.wasm.wasmPaths = "/ort/").
  *
- * Only the plain WASM execution provider is needed: the app runs single
- * threaded with proxy disabled, so the asyncify/jsep/jspi builds are unused.
+ * Only the CPU (WASM) execution provider is needed, so the asyncify, jsep and
+ * jspi variants are unused. The simd-threaded build starts a worker pool because
+ * web/next.config.ts enables cross-origin isolation (COOP and COEP), which is
+ * what unlocks SharedArrayBuffer for the WASM threads.
  * Model weights are NOT handled here; those are release artifacts placed in
  * public/models/ manually.
  */

@@ -2,38 +2,44 @@
 
 import { useCallback, useRef, useState } from "react";
 import { AnimatePresence, motion, MotionConfig } from "framer-motion";
-import ContinuousMode, {
-  type ContinuousModeHandle,
-} from "@/components/ContinuousMode";
+import ListenMode, {
+  type ListenModeHandle,
+} from "@/components/ListenMode";
 import Header from "@/components/Header";
 import ModeToggle, { type RecognitionMode } from "@/components/ModeToggle";
 import SettingsModal, {
   type MicrophoneOption,
 } from "@/components/SettingsModal";
-import SingleOscilloscope from "@/components/SingleOscilloscope";
+import AnalyzeMode from "@/components/AnalyzeMode";
+import {
+  CONFIDENCE_THRESHOLD,
+  TEMPERATURE,
+  type CalibrationSettings,
+} from "@/lib/onnxInference";
 
 const MICROPHONES: MicrophoneOption[] = [
   { deviceId: "default", label: "System default microphone" },
 ];
 
 export default function Home() {
-  const [mode, setMode] = useState<RecognitionMode>("continuous");
-  const [isCapturing, setIsCapturing] = useState(false);
+  const [mode, setMode] = useState<RecognitionMode>("listen");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [microphoneId, setMicrophoneId] = useState(MICROPHONES[0].deviceId);
-  const continuousRef = useRef<ContinuousModeHandle>(null);
+  const [microphones, setMicrophones] = useState(MICROPHONES);
+  const [microphoneError, setMicrophoneError] = useState<string | null>(null);
+  const [isLoadingMicrophones, setIsLoadingMicrophones] = useState(false);
+  const [calibration, setCalibration] = useState<CalibrationSettings>({
+    temperature: TEMPERATURE,
+    confidenceThreshold: CONFIDENCE_THRESHOLD,
+  });
+  const listenRef = useRef<ListenModeHandle>(null);
 
   const handleModeChange = (nextMode: RecognitionMode) => {
     setMode(nextMode);
-    setIsCapturing(false);
-  };
-
-  const handleToggleCapture = () => {
-    setIsCapturing((current) => !current);
   };
 
   const handleClearHistory = useCallback(() => {
-    continuousRef.current?.clearHistory();
+    listenRef.current?.clearHistory();
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -42,6 +48,59 @@ export default function Home() {
 
   const handleCloseSettings = useCallback(() => {
     setSettingsOpen(false);
+  }, []);
+
+  const handleRefreshMicrophones = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicrophoneError(
+        "This browser does not support microphone device discovery.",
+      );
+      return;
+    }
+
+    setIsLoadingMicrophones(true);
+    setMicrophoneError(null);
+    let temporaryStream: MediaStream | null = null;
+    try {
+      temporaryStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
+        (device) => device.kind === "audioinput",
+      );
+      const options = [
+        { deviceId: "default", label: "System default microphone" },
+        ...inputs
+          .filter((device) => device.deviceId && device.deviceId !== "default")
+          .map((device, index) => ({
+            deviceId: device.deviceId,
+            label: device.label || `Microphone ${index + 1}`,
+          })),
+      ];
+      setMicrophones(
+        options.filter(
+          (option, index) =>
+            options.findIndex(
+              (candidate) => candidate.deviceId === option.deviceId,
+            ) === index,
+        ),
+      );
+      setMicrophoneId((current) =>
+        options.some((option) => option.deviceId === current)
+          ? current
+          : "default",
+      );
+    } catch (error) {
+      setMicrophoneError(
+        error instanceof Error
+          ? error.message
+          : "Microphone devices could not be loaded.",
+      );
+    } finally {
+      temporaryStream?.getTracks().forEach((track) => track.stop());
+      setIsLoadingMicrophones(false);
+    }
   }, []);
 
   return (
@@ -66,15 +125,16 @@ export default function Home() {
                 transition={{ duration: 0.3, ease: "easeOut" }}
                 className="w-full"
               >
-                {mode === "continuous" ? (
-                  <ContinuousMode
-                    ref={continuousRef}
+                {mode === "listen" ? (
+                  <ListenMode
+                    ref={listenRef}
                     microphoneId={microphoneId}
+                    calibration={calibration}
                   />
                 ) : (
-                  <SingleOscilloscope
-                    isCapturing={isCapturing}
-                    onToggleCapture={handleToggleCapture}
+                  <AnalyzeMode
+                    microphoneId={microphoneId}
+                    calibration={calibration}
                   />
                 )}
               </motion.div>
@@ -84,9 +144,14 @@ export default function Home() {
 
         <SettingsModal
           open={settingsOpen}
-          microphones={MICROPHONES}
+          microphones={microphones}
           selectedMicrophoneId={microphoneId}
           onMicrophoneChange={setMicrophoneId}
+          microphoneError={microphoneError}
+          isLoadingMicrophones={isLoadingMicrophones}
+          onRefreshMicrophones={() => void handleRefreshMicrophones()}
+          calibration={calibration}
+          onCalibrationChange={setCalibration}
           onClearHistory={handleClearHistory}
           onClose={handleCloseSettings}
         />
@@ -94,4 +159,3 @@ export default function Home() {
     </MotionConfig>
   );
 }
-

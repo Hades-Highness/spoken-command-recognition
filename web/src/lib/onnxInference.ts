@@ -28,6 +28,11 @@ export const TEMPERATURE = 1.252585;
 /** Fitted operating point; probabilities below this value are rejected. */
 export const CONFIDENCE_THRESHOLD = 0.92;
 
+export type CalibrationSettings = {
+  temperature: number;
+  confidenceThreshold: number;
+};
+
 export const SILENCE_LABEL = "_silence_";
 export const UNKNOWN_LABEL = "_unknown_";
 
@@ -105,12 +110,15 @@ async function loadOrtRuntime(): Promise<OrtModule> {
     ortModulePromise = import("onnxruntime-web/wasm")
       .then((module) => {
         const ort = module as unknown as OrtModule;
+        // The threaded artefacts live in public/ort, see
+        // scripts/copy-ort-runtime.mjs.
         ort.env.wasm.wasmPaths = "/ort/";
-        // Multi-threaded WASM needs SharedArrayBuffer (cross-origin isolation)
-        // and a worker pool. One thread keeps the app working on any host; the
-        // graph is small enough that it finishes in a few milliseconds.
-        ort.env.wasm.numThreads = 1;
-        ort.env.wasm.proxy = false;
+        // numThreads stays at the runtime default so the worker pool of
+        // ort-wasm-simd-threaded.wasm is used. That backend needs a
+        // SharedArrayBuffer, which the browser only exposes while the document is
+        // cross-origin isolated; web/next.config.ts sends the COOP and COEP
+        // headers that enable it. If isolation is ever lost, ONNX Runtime Web
+        // detects the missing SharedArrayBuffer and reduces itself to one thread.
         ort.env.logLevel = "error";
         return ort;
       })
@@ -124,7 +132,7 @@ async function loadOrtRuntime(): Promise<OrtModule> {
 }
 
 /**
- * Owns the single ONNX InfererenceSession and serializes window classification
+ * Owns the analyze ONNX InfererenceSession and serializes window classification
  * so overlapping windows cannot run at the same time.
  */
 export class CommandSenseInference {
@@ -152,7 +160,13 @@ export class CommandSenseInference {
    *
    * @param audioData Exactly 16000 mono float samples in [-1, 1] at 16 kHz.
    */
-  runInference(audioData: Float32Array): Promise<InferenceResult> {
+  runInference(
+    audioData: Float32Array,
+    calibration: CalibrationSettings = {
+      temperature: TEMPERATURE,
+      confidenceThreshold: CONFIDENCE_THRESHOLD,
+    },
+  ): Promise<InferenceResult> {
     if (audioData.length !== WINDOW_SAMPLES) {
       return Promise.reject(
         new Error(
@@ -162,7 +176,7 @@ export class CommandSenseInference {
     }
 
     // Chain on the previous call so the session sees one window at a time.
-    const task = this.queue.then(() => this.execute(audioData));
+    const task = this.queue.then(() => this.execute(audioData, calibration));
     this.queue = task.then(
       () => undefined,
       () => undefined,
@@ -181,7 +195,10 @@ export class CommandSenseInference {
     }
   }
 
-  private async execute(audioData: Float32Array): Promise<InferenceResult> {
+  private async execute(
+    audioData: Float32Array,
+    calibration: CalibrationSettings,
+  ): Promise<InferenceResult> {
     const ort = await loadOrtRuntime();
     const session = await this.ensureSession();
 
@@ -206,7 +223,7 @@ export class CommandSenseInference {
       );
     }
 
-    return applyCalibration(logits);
+    return applyCalibration(logits, calibration);
   }
 
   private ensureSession(): Promise<OrtTypes.InferenceSession> {
@@ -265,13 +282,33 @@ export class CommandSenseInference {
  * Temperature scaling followed by a numerically stable softmax, then the tau
  * gate. Exported so the math can be unit tested without a model.
  */
-export function applyCalibration(logits: Float32Array): InferenceResult {
+export function applyCalibration(
+  logits: Float32Array,
+  {
+    temperature = TEMPERATURE,
+    confidenceThreshold = CONFIDENCE_THRESHOLD,
+  }: CalibrationSettings = {
+    temperature: TEMPERATURE,
+    confidenceThreshold: CONFIDENCE_THRESHOLD,
+  },
+): InferenceResult {
+  if (!Number.isFinite(temperature) || temperature <= 0) {
+    throw new Error("Temperature must be a finite number greater than zero.");
+  }
+  if (
+    !Number.isFinite(confidenceThreshold) ||
+    confidenceThreshold < 0 ||
+    confidenceThreshold > 1
+  ) {
+    throw new Error("Confidence threshold must be between 0 and 1.");
+  }
+
   const classCount = logits.length;
   const scaled = new Float32Array(classCount);
 
   let maxScaled = Number.NEGATIVE_INFINITY;
   for (let index = 0; index < classCount; index += 1) {
-    const value = logits[index] / TEMPERATURE;
+    const value = logits[index] / temperature;
     scaled[index] = value;
     if (value > maxScaled) {
       maxScaled = value;
@@ -298,18 +335,20 @@ export function applyCalibration(logits: Float32Array): InferenceResult {
   return {
     command: COMMAND_LABELS[bestIndex] ?? UNKNOWN_LABEL,
     confidence: bestProbability,
-    isRejected: bestProbability < CONFIDENCE_THRESHOLD,
+    isRejected: bestProbability < confidenceThreshold,
   };
 }
 
-/** Process-wide singleton: the model is loaded once per browser tab. */
+/** Process-wide analyzeton: the model is loaded once per browser tab. */
 export const onnxInference = new CommandSenseInference();
 
 export function loadModel(): Promise<void> {
   return onnxInference.load();
 }
 
-export function runInference(audioData: Float32Array): Promise<InferenceResult> {
-  return onnxInference.runInference(audioData);
+export function runInference(
+  audioData: Float32Array,
+  calibration?: CalibrationSettings,
+): Promise<InferenceResult> {
+  return onnxInference.runInference(audioData, calibration);
 }
-

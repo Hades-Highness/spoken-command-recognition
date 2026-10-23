@@ -2,11 +2,11 @@
 
 import { motion } from "framer-motion";
 
-export type RecognitionMode = "continuous" | "single";
+export type RecognitionMode = "listen" | "analyze";
 
 const MODE_OPTIONS: ReadonlyArray<{ id: RecognitionMode; label: string }> = [
-  { id: "continuous", label: "Continuous" },
-  { id: "single", label: "Single Shot" },
+  { id: "listen", label: "Listen Mode" },
+  { id: "analyze", label: "Analyze Mode" },
 ];
 
 type ModeToggleProps = {
