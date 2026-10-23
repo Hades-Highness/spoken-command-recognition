@@ -8,13 +8,14 @@ import {
   useState,
   type Ref,
 } from "react";
-import ContinuousVisualizer, {
+import ListenVisualizer, {
   type HistoryEntry,
-} from "@/components/ContinuousVisualizer";
+} from "@/components/ListenVisualizer";
 import { AudioProcessor } from "@/lib/audioProcessor";
 import {
   REJECTION_LABELS,
   loadModel,
+  type CalibrationSettings,
   type InferenceResult,
 } from "@/lib/onnxInference";
 
@@ -33,30 +34,33 @@ const STATUS_MESSAGES: Record<SessionStatus, string> = {
   error: "The recognition session stopped.",
 };
 
-export type ContinuousModeHandle = {
+export type ListenModeHandle = {
   clearHistory: () => void;
 };
 
-type ContinuousModeProps = {
-  ref?: Ref<ContinuousModeHandle>;
+type ListenModeProps = {
+  ref?: Ref<ListenModeHandle>;
   /** Device selected in Settings; "default" follows the system input. */
   microphoneId: string;
+  calibration: CalibrationSettings;
 };
 
 /**
- * Owns the continuous-mode session: the ONNX session (through the singleton in
+ * Owns the listen-mode session: the ONNX session (through the singleton in
  * lib/onnxInference), the microphone pipeline and the detection history.
  *
- * ContinuousVisualizer stays presentational, so the expensive audio objects
+ * ListenVisualizer stays presentational, so the expensive audio objects
  * never end up in component state or re-render paths.
  */
-export default function ContinuousMode({
+export default function ListenMode({
   ref,
   microphoneId,
-}: ContinuousModeProps) {
+  calibration,
+}: ListenModeProps) {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
 
   const processorRef = useRef<AudioProcessor | null>(null);
   const mountedRef = useRef(true);
@@ -71,6 +75,10 @@ export default function ContinuousMode({
     }),
     [],
   );
+
+  useEffect(() => {
+    processorRef.current?.setCalibration(calibration);
+  }, [calibration]);
 
   const handleResult = useCallback((result: InferenceResult) => {
     if (result.isRejected || REJECTION_LABELS.has(result.command)) {
@@ -144,7 +152,9 @@ export default function ContinuousMode({
       const processor = new AudioProcessor({
         deviceId: microphoneId,
         onResult: handleResult,
+        onAudioLevel: setAudioLevel,
         onError: handleError,
+        calibration,
       });
       await processor.start();
 
@@ -174,7 +184,7 @@ export default function ContinuousMode({
           : "The recognition session could not start.",
       );
     }
-  }, [handleError, handleResult, microphoneId]);
+  }, [calibration, handleError, handleResult, microphoneId]);
 
   const handleToggleListening = useCallback(() => {
     if (status === "loading") {
@@ -208,9 +218,10 @@ export default function ContinuousMode({
   }, []);
 
   return (
-    <ContinuousVisualizer
+    <ListenVisualizer
       isListening={status === "listening"}
       isBusy={status === "loading"}
+      audioLevel={audioLevel}
       statusMessage={STATUS_MESSAGES[status]}
       errorMessage={errorMessage}
       history={history}

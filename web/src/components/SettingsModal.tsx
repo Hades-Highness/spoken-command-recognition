@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import type { CalibrationSettings } from "@/lib/onnxInference";
 
 export type MicrophoneOption = {
   deviceId: string;
@@ -13,6 +14,11 @@ type SettingsModalProps = {
   microphones: MicrophoneOption[];
   selectedMicrophoneId: string;
   onMicrophoneChange: (deviceId: string) => void;
+  microphoneError: string | null;
+  isLoadingMicrophones: boolean;
+  onRefreshMicrophones: () => void;
+  calibration: CalibrationSettings;
+  onCalibrationChange: (calibration: CalibrationSettings) => void;
   onClearHistory: () => void;
   onClose: () => void;
 };
@@ -22,6 +28,11 @@ export default function SettingsModal({
   microphones,
   selectedMicrophoneId,
   onMicrophoneChange,
+  microphoneError,
+  isLoadingMicrophones,
+  onRefreshMicrophones,
+  calibration,
+  onCalibrationChange,
   onClearHistory,
   onClose,
 }: SettingsModalProps) {
@@ -80,7 +91,7 @@ export default function SettingsModal({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.98 }}
             transition={{ duration: 0.22, ease: "easeOut" }}
-            className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#111111] shadow-2xl"
+            className="relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-white/10 bg-[#111111] shadow-2xl"
           >
             <div className="flex items-start justify-between gap-4 border-b border-white/5 px-5 py-4">
               <div>
@@ -164,9 +175,83 @@ export default function SettingsModal({
                 </div>
 
                 <p className="mt-2 text-xs leading-5 text-text-muted">
-                  Browser microphone permission is requested when a session
-                  starts. The device list stays empty until access is granted.
+                  Allow microphone access to load available input devices.
                 </p>
+                <button
+                  type="button"
+                  onClick={onRefreshMicrophones}
+                  disabled={isLoadingMicrophones}
+                  className="mt-3 inline-flex items-center justify-center rounded-full border border-white/10 px-4 py-2 text-xs font-medium text-text-main transition-colors hover:border-primary/60 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover disabled:cursor-progress disabled:opacity-50"
+                >
+                  {isLoadingMicrophones
+                    ? "Loading microphones…"
+                    : "Detect microphones"}
+                </button>
+                {microphoneError && (
+                  <p role="alert" className="mt-2 text-xs text-primary-hover">
+                    {microphoneError}
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">
+                <p className="text-sm font-medium text-text-main">
+                  Recognition calibration
+                </p>
+                <p className="mt-1 text-xs leading-5 text-text-muted">
+                  Applied to both listening modes. T controls probability
+                  calibration; tau sets the minimum confidence for acceptance.
+                </p>
+
+                <label
+                  htmlFor="temperature-setting"
+                  className="mt-4 flex items-center justify-between text-xs text-text-muted"
+                >
+                  <span>Temperature (T)</span>
+                  <span className="font-mono tabular-nums text-text-main">
+                    {calibration.temperature.toFixed(2)}
+                  </span>
+                </label>
+                <input
+                  id="temperature-setting"
+                  type="range"
+                  min="0.1"
+                  max="5"
+                  step="0.01"
+                  value={calibration.temperature}
+                  onChange={(event) =>
+                    onCalibrationChange({
+                      ...calibration,
+                      temperature: Number(event.target.value),
+                    })
+                  }
+                  className="mt-2 w-full accent-primary-hover"
+                />
+
+                <label
+                  htmlFor="confidence-threshold-setting"
+                  className="mt-4 flex items-center justify-between text-xs text-text-muted"
+                >
+                  <span>Confidence threshold (tau)</span>
+                  <span className="font-mono tabular-nums text-text-main">
+                    {calibration.confidenceThreshold.toFixed(2)}
+                  </span>
+                </label>
+                <input
+                  id="confidence-threshold-setting"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={calibration.confidenceThreshold}
+                  onChange={(event) =>
+                    onCalibrationChange({
+                      ...calibration,
+                      confidenceThreshold: Number(event.target.value),
+                    })
+                  }
+                  className="mt-2 w-full accent-primary-hover"
+                />
               </div>
 
               <div className="rounded-xl border border-white/5 bg-white/[0.02] p-4">

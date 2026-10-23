@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Footer from "@/components/Footer";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -34,9 +35,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <div className="background-blob -bottom-48 left-1/3 h-[24rem] w-[24rem]" />
         </div>
 
-        <div className="relative z-10 flex flex-1 flex-col">{children}</div>
+        <div className="relative z-10 flex flex-1 flex-col">
+          {children}
+          <Footer />
+        </div>
       </body>
     </html>
   );
 }
-
