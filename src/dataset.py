@@ -176,6 +176,27 @@ def _download_archive(url: str, output_dir: str) -> str:
     return archive_path
 
 
+def _normalize_speech_commands_layout() -> None:
+    """Move a flat Speech Commands extraction into torchaudio's expected folder."""
+    if os.path.isdir(SPEECH_COMMANDS_DIR):
+        return
+
+    flat_noise_dir = os.path.join(SPEECH_COMMANDS_ROOT, "_background_noise_")
+    if not os.path.isdir(flat_noise_dir):
+        return
+
+    os.makedirs(SPEECH_COMMANDS_DIR)
+    for name in os.listdir(SPEECH_COMMANDS_ROOT):
+        source = os.path.join(SPEECH_COMMANDS_ROOT, name)
+        if name == os.path.basename(SPEECH_COMMANDS_DIR):
+            continue
+        if os.path.isfile(source) and name.endswith((".tar.gz", ".tgz")):
+            continue
+        shutil.move(source, os.path.join(SPEECH_COMMANDS_DIR, name))
+
+    print(f"[*] Organized Speech Commands files into {SPEECH_COMMANDS_DIR}")
+
+
 def ensure_speech_commands() -> str:
     """Return ``data/SpeechCommands/speech_commands_v0.02``, fetching it if absent."""
     if os.path.isdir(SPEECH_COMMANDS_DIR):
@@ -184,6 +205,7 @@ def ensure_speech_commands() -> str:
 
     print("[*] Speech Commands v0.02 not found; downloading (~2.3 GB)...")
     _download_archive(SPEECH_COMMANDS_URL, SPEECH_COMMANDS_ROOT)
+    _normalize_speech_commands_layout()
 
     if not os.path.isdir(SPEECH_COMMANDS_DIR):
         raise RuntimeError(

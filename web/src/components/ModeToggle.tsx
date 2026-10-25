@@ -23,6 +23,7 @@ export default function ModeToggle({ mode, onModeChange }: ModeToggleProps) {
     >
       {MODE_OPTIONS.map((option) => {
         const isActive = option.id === mode;
+        const isLisentMode = option.id === "listen";
 
         return (
           <button
@@ -30,15 +31,15 @@ export default function ModeToggle({ mode, onModeChange }: ModeToggleProps) {
             type="button"
             aria-pressed={isActive}
             onClick={() => onModeChange(option.id)}
-            className={`relative rounded-full px-5 py-2 text-sm font-medium transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:px-6 ${
-              isActive ? "text-text-main" : "text-text-muted hover:text-text-main"
+            className={`relative rounded-full px-5 py-2 text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-hover focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:px-6 ${
+              isActive ? "text-black font-bold" : "text-text-muted font-medium hover:text-text-main"
             }`}
           >
             {isActive ? (
               <motion.span
                 layoutId="mode-toggle-indicator"
                 aria-hidden="true"
-                className="absolute inset-0 rounded-full bg-primary"
+                className={`absolute inset-0 rounded-full  ${isLisentMode ? 'bg-gradient-to-r' : 'bg-gradient-to-l'} from-primary to-secondary`}
                 transition={{ type: "spring", stiffness: 380, damping: 32 }}
               />
             ) : null}

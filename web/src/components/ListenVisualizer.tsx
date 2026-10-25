@@ -48,7 +48,7 @@ export default function ListenVisualizer({
       className="flex w-full flex-col overflow-hidden rounded-3xl border border-white/10 bg-[#111111] sm:flex-row"
     >
       <div className="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-6 px-2 py-10 sm:gap-8 sm:px-4 sm:py-12">
-        <p className="absolute left-4 top-4 text-[10px] font-medium uppercase tracking-[0.22em] text-text-muted sm:left-6 sm:top-6">
+        <p className="absolute left-4 top-4 text-[12px] font-medium uppercase tracking-[0.22em] text-text-muted sm:left-6 sm:top-6">
           Listen Mode
         </p>
 
@@ -146,7 +146,7 @@ export default function ListenVisualizer({
       >
         <h2
           id="history-heading"
-          className="text-[10px] font-medium uppercase tracking-[0.18em] text-text-muted"
+          className="text-[12px] font-medium uppercase tracking-[0.18em] text-text-muted"
         >
           History
         </h2>

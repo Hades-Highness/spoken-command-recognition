@@ -60,6 +60,7 @@ export default function ListenMode({
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [ambiguityMessage, setAmbiguityMessage] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
 
   const processorRef = useRef<AudioProcessor | null>(null);
@@ -81,6 +82,14 @@ export default function ListenMode({
   }, [calibration]);
 
   const handleResult = useCallback((result: InferenceResult) => {
+    if (result.ambiguity) {
+      setAmbiguityMessage(
+        `This may be “three” or “tree” (${Math.round(result.ambiguity.combinedConfidence * 100)}% combined confidence). The model can't tell which word you intended.`,
+      );
+      return;
+    }
+    setAmbiguityMessage(null);
+
     if (result.isRejected || REJECTION_LABELS.has(result.command)) {
       return;
     }
@@ -132,6 +141,7 @@ export default function ListenMode({
     if (mountedRef.current) {
       setStatus("idle");
       setErrorMessage(null);
+      setAmbiguityMessage(null);
     }
   }, []);
 
@@ -141,6 +151,7 @@ export default function ListenMode({
 
     setStatus("loading");
     setErrorMessage(null);
+    setAmbiguityMessage(null);
     lastAcceptedRef.current = null;
 
     try {
@@ -222,7 +233,7 @@ export default function ListenMode({
       isListening={status === "listening"}
       isBusy={status === "loading"}
       audioLevel={audioLevel}
-      statusMessage={STATUS_MESSAGES[status]}
+      statusMessage={ambiguityMessage ?? STATUS_MESSAGES[status]}
       errorMessage={errorMessage}
       history={history}
       onToggleListening={handleToggleListening}

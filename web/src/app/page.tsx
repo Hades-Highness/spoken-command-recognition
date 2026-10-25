@@ -11,6 +11,7 @@ import SettingsModal, {
   type MicrophoneOption,
 } from "@/components/SettingsModal";
 import AnalyzeMode from "@/components/AnalyzeMode";
+import ModelInfo from "@/components/ModelInfo";
 import {
   CONFIDENCE_THRESHOLD,
   TEMPERATURE,
@@ -145,6 +146,7 @@ export default function Home() {
               </motion.div>
             </AnimatePresence>
           </div>
+          <ModelInfo />
         </main>
 
         <SettingsModal

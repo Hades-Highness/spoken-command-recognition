@@ -11,16 +11,18 @@ leaves the machine.
 1. Place the release artifact at `public/models/CommandSense_v4.1.onnx`.
    Model weights are not committed; the loader expects exactly this file name.
 2. Install dependencies with `npm install`. The `postinstall` script copies the
-   ONNX Runtime WASM files from `node_modules` into `public/ort`, which is where
-   `ort.env.wasm.wasmPaths` points. `predev` and `prebuild` refresh them if the
-   `onnxruntime-web` version changes.
+   standalone ONNX Runtime Web module and its WASM files from `node_modules`
+   into `public/ort`. The browser loads the module at runtime as a static asset,
+   outside Turbopack's module graph. `predev` and `prebuild` refresh the assets
+   if the `onnxruntime-web` version changes.
 
 If the model is missing, the UI reports the HTTP 404 instead of failing
 silently.
 
 ### Pipeline
 
-- `src/lib/onnxInference.ts` loads the session once per tab, feeds 16000-sample
+- `src/lib/onnxInference.ts` loads the runtime and session on demand once per
+  tab, feeds 16000-sample
   float windows shaped `[1, 16000]`, then applies temperature scaling
   (`T = 1.252585`), softmax and the `tau = 0.92` rejection gate. Label order is
   mirrored from `configs/labels.json`.

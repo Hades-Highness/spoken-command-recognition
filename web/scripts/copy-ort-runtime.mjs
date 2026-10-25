@@ -9,7 +9,7 @@
  * Model weights are NOT handled here; those are release artifacts placed in
  * public/models/ manually.
  */
-import { copyFile, mkdir, stat } from "node:fs/promises";
+import { copyFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,7 +17,14 @@ const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceDir = join(projectRoot, "node_modules", "onnxruntime-web", "dist");
 const targetDir = join(projectRoot, "public", "ort");
 
-const ARTIFACTS = ["ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm"];
+const ARTIFACTS = [
+  "ort.wasm.min.mjs",
+  "ort-wasm-simd-threaded.mjs",
+  "ort-wasm-simd-threaded.wasm",
+];
+const LOADER = `import * as ort from "./ort.wasm.min.mjs";
+window.__commandSenseOrt = ort;
+`;
 
 async function isCurrent(source, target) {
   try {
@@ -47,6 +54,8 @@ async function main() {
     copied += 1;
     console.log(`[ort] copied ${name} to public/ort`);
   }
+
+  await writeFile(join(targetDir, "ort-runtime-loader.mjs"), LOADER);
 
   if (copied === 0) {
     console.log("[ort] public/ort is up to date");

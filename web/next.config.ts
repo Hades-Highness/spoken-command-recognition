@@ -47,6 +47,14 @@ const nextConfig: NextConfig = {
         source: "/:path*",
         headers: crossOriginIsolationHeaders,
       },
+      {
+        source: '/ort/:path*',
+        headers: [{ key: 'Cache-Control', value: 'public, max-age=3000000, immutable' }],
+      },
+      {
+        source: '/models/:path*',
+        headers: [{ key: 'Cache-Control', value: 'public, max-age=3000000, immutable' }],
+      },
     ];
   },
 };

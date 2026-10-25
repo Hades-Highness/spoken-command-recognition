@@ -28,6 +28,9 @@ export const TEMPERATURE = 1.252585;
 /** Fitted operating point; probabilities below this value are rejected. */
 export const CONFIDENCE_THRESHOLD = 0.92;
 
+const AMBIGUITY_THRESHOLD_RATIO = 0.9;
+const AMBIGUITY_MIN_SCORE_RATIO = 0.75;
+
 export type CalibrationSettings = {
   temperature: number;
   confidenceThreshold: number;
@@ -92,44 +95,84 @@ export type InferenceResult = {
   command: string;
   /** Calibrated probability of the winning class, in [0, 1]. */
   confidence: number;
+  /** Present when the audio plausibly matches either "three" or "tree". */
+  ambiguity?: {
+    choices: readonly ["three", "tree"];
+    combinedConfidence: number;
+  };
   /** True when the winning probability is below CONFIDENCE_THRESHOLD. */
   isRejected: boolean;
 };
 
 type OrtModule = typeof import("onnxruntime-web");
 
+declare global {
+  interface Window {
+    __commandSenseOrt?: OrtModule;
+  }
+}
+
 let ortModulePromise: Promise<OrtModule> | null = null;
 
 /**
- * Loads onnxruntime-web on demand so the runtime never enters the server
- * bundle, and points it at the WASM assets that scripts/copy-ort-runtime.mjs
- * writes to public/ort.
+ * Loads the standalone runtime from public/ort, outside Turbopack's module
+ * graph, and points it at the WASM assets copied there by the predev/prebuild
+ * script.
  */
 async function loadOrtRuntime(): Promise<OrtModule> {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    throw new Error("ONNX Runtime Web can only be loaded in a browser.");
+  }
+
   if (!ortModulePromise) {
-    ortModulePromise = import("onnxruntime-web/wasm")
-      .then((module) => {
-        const ort = module as unknown as OrtModule;
-        const isMobile = 
-  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || 
-  window.innerWidth < 768;
+    ortModulePromise = new Promise<OrtModule>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.type = "module";
+      script.src = "/ort/ort-runtime-loader.mjs";
+      script.onload = () => {
+        try {
+          const ort = window.__commandSenseOrt;
+          if (!ort) {
+            throw new Error("The ONNX Runtime module did not initialize.");
+          }
 
-        ort.env.wasm.wasmPaths = "/ort/";
-        ort.env.logLevel = "error";
+          const isMobile =
+            /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+              navigator.userAgent,
+            ) || window.innerWidth < 768;
 
-        if (isMobile) {
-          ort.env.wasm.numThreads = 1;
-          ort.env.wasm.proxy = false;
-          console.log("[ONNX] Mobile browser detected. Using single-threaded WASM for stability.");
-        } else {
-          console.log("[ONNX] Desktop browser detected. Using multithreaded WASM.");
+          ort.env.wasm.wasmPaths = "/ort/";
+          ort.env.logLevel = "error";
+
+          if (isMobile) {
+            ort.env.wasm.numThreads = 1;
+            ort.env.wasm.proxy = false;
+            console.log(
+              "[ONNX] Mobile browser detected. Using single-threaded WASM for stability.",
+            );
+          } else {
+            console.log(
+              "[ONNX] Desktop browser detected. Using multithreaded WASM.",
+            );
+          }
+          resolve(ort);
+        } catch (error) {
+          reject(error);
         }
-        return ort;
-      })
-      .catch((error: unknown) => {
-        ortModulePromise = null;
-        throw error;
-      });
+      };
+      script.onerror = () => {
+        script.remove();
+        reject(
+          new Error(
+            "Unable to load /ort/ort-runtime-loader.mjs. Run the project predev or prebuild script to copy the ONNX Runtime assets.",
+          ),
+        );
+      };
+      document.head.append(script);
+    }).catch((error: unknown) => {
+      ortModulePromise = null;
+      throw error;
+    });
   }
 
   return ortModulePromise;
@@ -336,10 +379,36 @@ export function applyCalibration(
     }
   }
 
+  const threeIndex = COMMAND_LABELS.indexOf("three");
+  const treeIndex = COMMAND_LABELS.indexOf("tree");
+  const threeConfidence =
+    threeIndex >= 0 && total > 0 ? scaled[threeIndex] / total : 0;
+  const treeConfidence =
+    treeIndex >= 0 && total > 0 ? scaled[treeIndex] / total : 0;
+  const combinedConfidence =
+    threeConfidence + treeConfidence;
+  const lowerPairConfidence = Math.min(threeConfidence, treeConfidence);
+  const higherPairConfidence = Math.max(threeConfidence, treeConfidence);
+  const command = COMMAND_LABELS[bestIndex] ?? UNKNOWN_LABEL;
+  const isRejected = bestProbability < confidenceThreshold;
+  const isThreeTreeAmbiguous =
+    isRejected &&
+    (command === "three" || command === "tree") &&
+    combinedConfidence >= confidenceThreshold * AMBIGUITY_THRESHOLD_RATIO &&
+    lowerPairConfidence >= higherPairConfidence * AMBIGUITY_MIN_SCORE_RATIO;
+
   return {
-    command: COMMAND_LABELS[bestIndex] ?? UNKNOWN_LABEL,
+    command,
     confidence: bestProbability,
-    isRejected: bestProbability < confidenceThreshold,
+    ...(isThreeTreeAmbiguous
+      ? {
+          ambiguity: {
+            choices: ["three", "tree"] as const,
+            combinedConfidence,
+          },
+        }
+      : {}),
+    isRejected,
   };
 }
 

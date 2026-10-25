@@ -356,7 +356,7 @@ export default function AnalyzeMode({
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.22em] text-text-muted">
+          <p className="text-[12px] font-medium uppercase tracking-[0.22em] text-text-muted">
             Analyze Mode
           </p>
         </div>
@@ -502,7 +502,9 @@ export default function AnalyzeMode({
           label="Command"
           value={
             result
-              ? rejected
+              ? result.ambiguity
+                ? "three or tree"
+                : rejected
                 ? "No clear command detected"
                 : result.command
               : isAnalyzing
@@ -511,10 +513,10 @@ export default function AnalyzeMode({
           }
         />
         <ResultCard
-          label="Confidence"
+          label={result?.ambiguity ? "Combined confidence" : "Confidence"}
           value={
             result
-              ? `${Math.round(result.confidence * 100)}%`
+              ? `${Math.round((result.ambiguity?.combinedConfidence ?? result.confidence) * 100)}%`
               : isAnalyzing
                 ? "Pending"
                 : "—"
@@ -522,6 +524,18 @@ export default function AnalyzeMode({
         />
         <ResultCard label="Model window" value="1.00 s" />
       </dl>
+
+      {result?.ambiguity && (
+        <p
+          role="status"
+          className="mt-4 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm leading-6 text-text-muted"
+        >
+          The audio may be either “three” or “tree”. Their combined confidence
+          is close to the configured threshold, but the model cannot tell which
+          word you intended from this short recording. It keeps the commands
+          separate and does not use sentence context, so it will not guess.
+        </p>
+      )}
 
       {errorMessage && (
         <p role="alert" className="mt-4 text-sm text-primary-hover">
