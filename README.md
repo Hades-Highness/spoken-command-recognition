@@ -19,7 +19,7 @@
   <a href="#quickstart">Quickstart</a> •
   <a href="#training">Training</a> •
   <a href="#evaluation">Evaluation</a> •
-  <a href="#unified-web-interface">Web Interface</a> •
+  <a href="#web-interface">Web Interface</a> •
   <a href="#datasets">Datasets</a> •
   <a href="#reproducibility-and-limitations">Reproducibility</a> •
   <a href="#citation">Citation</a> •
@@ -30,11 +30,11 @@
 
 ## Overview
 
-CommandSense is an end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition. It features a 16 kHz high-resolution three-channel Log-Mel spectrogram front-end, a dual-backend deployment architecture, and explicit rejection of silence and out-of-vocabulary (OOV) speech.
+CommandSense is an end-to-end deep learning pipeline for spoken keyword spotting and audio command recognition. The v4.1 web application is a client-side Next.js application that runs an INT8 ONNX model in the browser with ONNX Runtime Web and WebAssembly. It accepts 16 kHz mono audio and explicitly rejects silence and out-of-vocabulary (OOV) speech.
 
-The repository documents each released version with its own model card, metrics and artifacts. The current release (**v4.0**) adds **SNR-controlled noise mixing** during training to improve robustness to background speech and ambient noise. Unlike v3.1 and v3.2, v4.0 trains new weights — the architecture is unchanged, but eligible command clips now include mixed-noise conditions. A held-out noise evaluation reports substantially higher command accuracy than v3.0 at every tested SNR from 5 to 20 dB.
+The repository documents each released version with its own model card, metrics and artifacts. The v4.0 model release adds **SNR-controlled noise mixing** during training to improve robustness to background speech and ambient noise. The v4.1 release packages the model as a browser-based application; audio processing and inference run locally in the browser.
 
-**What this repository is:** a reproducible pipeline (training, evaluation, ONNX/PyTorch inference, INT8 quantization, web demo), the metrics and calibration artifacts of all previous versions, and a model card per version.
+**What this repository is:** a reproducible training and evaluation pipeline, versioned model artifacts and calibration, and a client-side web application for local inference.
 
 **What it is not:** a general-purpose ASR system. It is a strict 35-command keyword spotter with learned OOV and silence rejection, plus calibrated confidence thresholding.
 
@@ -42,17 +42,17 @@ The repository documents each released version with its own model card, metrics 
 
 ## Results
 
-### Headline (v4.0 Noise-Mixing Release)
+### Headline (v4.0 Model and v4.1 Web Release)
 
 | Metric | Value | Source of truth |
 | :-- | :-- | :-- |
-| **Test Accuracy (35 cmd)** | **95.6111%** (10,522 / 11,005) | `reports/model_v4.0/report_v4.0.txt` |
-| **Validation Accuracy** | **96.41%** | `reports/model_v4.0/report_v4.0.txt` |
+| **Test Accuracy (35 cmd)** | **95.6111%** (10,522 / 11,005) | `reports/model_v4.1/report_v4.1.txt` |
+| **Validation Accuracy** | **96.4113%** | `reports/model_v4.1/report_v4.1.txt` |
 | **Noise mixing** | 50% of eligible training clips mixed at controlled SNR | `configs/config.py` |
-| **Artifact Size (FP32)** | 4.67 MB | `checkpoints/model_v4.0/CommandSense_v4.0.pth` |
+| **Web model artifact** | ≈1.4 MB, INT8 ONNX | `web/public/models/CommandSense_v4.1.onnx` |
 | **Parameters** | 1,217,349 | `src/models.py` |
 
-On the clean 35-command test split, v4.0 scores 0.25 points below v3.0. On the held-out noise evaluation, v4.0 improves mean Top-1 accuracy by **19.36 points** over v3.0 across four tested SNRs (5–20 dB). See the [v4.0 model card](reports/model_v4.0/README.md) and [`robustness_report_v4.0.txt`](reports/model_v4.0/robustness_report_v4.0.txt) for per-condition results and protocol details.
+On the clean 35-command test split, the v4.1 report records 95.6111% Top-1 accuracy. The v4.0 held-out noise evaluation found higher mean Top-1 accuracy than v3.0 across four tested SNRs (5–20 dB). See the [v4.1 model card](reports/model_v4.1/README.md), [v4.0 model card](reports/model_v4.0/README.md), and [`robustness_report_v4.0.txt`](reports/model_v4.0/robustness_report_v4.0.txt) for specifications and evaluation details.
 
 | SNR | v4.0 Top-1 | v3.0 Top-1 | Difference |
 | :-: | --: | --: | --: |
@@ -76,8 +76,9 @@ The command metrics use the official speaker-disjoint splits, but not every row 
 | **v2.2** | Calibration release: temperature scaling + threshold | 1,217,349 | 94.94% | **94.1481%** | 0.9364 | `_silence_` 98.36%<br>`_unknown_` 99.09% | 94.5642% | **0.0000** ‡ | [v2.2 card](reports/model_v2.2/README.md) |
 | **v3.0** | Memory-optimized pipeline + conditional GPU augmentation | 1,217,349 | 96.36% | **95.8655%** | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | **+1.7174** | [v3.0 card](reports/model_v3.0/README.md) |
 | **v3.1** | Deployment release: static INT8 (QDQ) quantization | 1,217,349 | 96.36% | 95.8655%\* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.1 card](reports/model_v3.1/README.md) |
-| **v3.2** | Application release: unified Gradio UI and real-time spotter | 1,217,349 | 96.36% | 95.8655%\* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.2 card](reports/model_v3.2/README.md) |
+| **v3.2** | Application release: real-time spotter and single-clip analysis | 1,217,349 | 96.36% | 95.8655%\* | 0.9541 § | `_silence_` 100.00%<br>`_unknown_` 98.55% | 96.1751% | 0.0000 | [v3.2 card](reports/model_v3.2/README.md) |
 | **v4.0** | Noise-mixing training release | 1,217,349 | 96.41% | 95.6111% | 0.9533 | `_silence_` 100.00%<br>`_unknown_` 97.64% | 95.9025% | **−0.2544** | [v4.0 card](reports/model_v4.0/README.md) |
+| **v4.1** | Client-side Next.js app with INT8 ONNX Runtime Web inference | 1,217,349 | 96.41% | 95.6111% | 0.9533 | `_silence_` 100.00%<br>`_unknown_` 97.64% | 95.9025% | 0.0000 | [v4.1 card](reports/model_v4.1/README.md) |
 
 † The v2.1 validation split contains 10,979 clips (9,981 commands + 998 rejection samples), so its `Val Acc` is not comparable to the rows above. The comparable figures are the test columns.
 
@@ -99,7 +100,7 @@ The command metrics use the official speaker-disjoint splits, but not every row 
 
 ## Model Cards
 
-Each version has a model card documenting its configuration, full classification report, training curves, confusion matrix, and version-specific caveats.
+Each version has a model card documenting its configuration, evaluation results, artifacts, and version-specific caveats.
 
 | Version | Card | Focus |
 | :-- | :-- | :-- |
@@ -110,7 +111,8 @@ Each version has a model card documenting its configuration, full classification
 | v3.0 | [model_v3.0](reports/model_v3.0/README.md) | Memory-optimized pipeline and GPU augmentations |
 | v3.1 | [model_v3.1](reports/model_v3.1/README.md) | INT8 static quantization fidelity |
 | v3.2 | [model_v3.2](reports/model_v3.2/README.md) | Real-time application layer, latency and thread safety |
-| v4.0 | [model_v4.0](reports/model_v4.0/README.md) | **Current Release**: SNR-controlled noise mixing and held-out noise evaluation |
+| v4.0 | [model_v4.0](reports/model_v4.0/README.md) | SNR-controlled noise mixing and held-out noise evaluation |
+| v4.1 | [model_v4.1](reports/model_v4.1/README.md) | **Current Web Release**: client-side Next.js app and INT8 ONNX Runtime Web inference |
 
 ---
 
@@ -162,7 +164,8 @@ flowchart LR
 │   ├── model_v3.0/               # FP32 weights and float32 ONNX reference
 │   ├── model_v3.1/               # INT8 deployment artifacts
 │   ├── model_v3.2/               # v3.2 bundle: same weights and INT8 graph
-│   └── model_v4.0/               # v4.0 weights trained with noise mixing
+│   ├── model_v4.0/               # v4.0 weights trained with noise mixing
+│   └── model_v4.1/               # v4.1 weights and FP32 ONNX graph
 ├── configs/                      # Global hyperparameters, paths and class mapping
 │   ├── calibration/              # Calibration payload (T and tau)
 │   ├── config.py
@@ -172,10 +175,11 @@ flowchart LR
 │   ├── model_v3.0/
 │   ├── model_v3.1/
 │   ├── model_v3.2/
-│   └── model_v4.0/               # Training, evaluation and calibration reports
+│   ├── model_v4.0/               # Training, evaluation and calibration reports
+│   └── model_v4.1/               # Model card, screenshots and evaluation reports
 ├── src/                          # Source modules (dataset, transforms, models, inference)
 ├── tests/                        # Pipeline, calibration and quantization smoke tests
-├── app.py                        # Unified two-tab Gradio interface
+├── web/                          # Next.js client with ONNX Runtime Web inference
 ├── evaluate.py                   # Metrics, calibration fit and tau sweep
 ├── export_onnx.py                # Baked front-end export + static INT8 (QDQ) quantization
 ├── listen.py                     # SharedRuntime, KeywordSpotter and optional CLI
@@ -187,61 +191,31 @@ flowchart LR
 
 ## Quickstart
 
-### 1. Install
+### Run the web application
 
 ```bash
 git clone https://github.com/Hades-Highness/spoken-command-recognition.git
 cd spoken-command-recognition
+```
+
+The web app requires Node.js and npm. Model weights are distributed separately; place `CommandSense_v4.1.onnx` in `web/public/models/` before launching. Install the web dependencies and start the development server:
+
+```bash
+cd web && npm install && npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000). Microphone access requires browser permission. Audio capture and inference run locally in the browser; audio is not uploaded to a server.
+
+### Reproduce training and evaluation
+
+```bash
 pip install -r requirements.txt
+python train.py
+python evaluate.py
+python export_onnx.py
 ```
 
-### 2. Download the model weights
-
-Checkpoints are not committed to keep the repository lightweight. Grab the **v4.0 release bundle** from the [Releases page](https://github.com/Hades-Highness/spoken-command-recognition/releases) and place the files into the versioned folder:
-
-```text
-checkpoints/model_v4.0/
-├── CommandSense_v4.0.pth          # Trained with SNR-controlled noise mixing
-├── CommandSense_v4.0_int8.onnx    # INT8 QDQ graph: [B, 3, 64, 63] features in, logits out
-└── CommandSense_v4.0_fp32.onnx    # The same graph before quantization
-```
-
-The v4.0 graphs consume the three-channel log-mel features, so the front-end runs
-in Python. From **v4.1** on the exporter bakes the front-end into the graph: the
-artifact is named `CommandSense_<version>.onnx` and takes `[B, 16000]` raw audio
-(float32, 16 kHz mono) instead. `src/inference.py` and `listen.py` read the input
-rank of whichever graph they load and feed the matching payload, so old and new
-artifacts both work unchanged.
-
-The configured `MODEL_VERSION` in `configs/config.py` decides which folder is read -
-keep it pointing at the release you downloaded.
-
-The fitted operating point is tracked in git at `configs/calibration/CommandSense_calibration_v4.0.json` (`T = 1.252585`, `tau = 0.92`) and is resolved automatically.
-
-*(Note: To reproduce training from scratch, use `train.py`, which writes to `checkpoints/model_v4.0/`. To build the deployment graph, run `python export_onnx.py`: that single command exports the float32 reference and quantizes it to the INT8 artifact.)*
-
-### 3. Launch the unified web interface
-
-```bash
-python app.py
-```
-
-Open the printed local URL. The interface has two tabs:
-
-- **Real-time Keyword Spotting**: continuous microphone listening with a 0.5 s classification hop and 1.5 s cooldown. Accepted commands appear in the detection history with their calibrated confidence.
-- **Single Recording Analysis**: record or upload a clip, choose the ONNX or PyTorch backend, and classify. The `tau` slider lets you explore the rejection threshold without changing the fitted operating point.
-
-Both tabs share one process-wide runtime, so the model, calibration and ONNX session are loaded once.
-
-### 4. Reproduce the published metrics
-
-```bash
-python train.py          # trains v4.0 from scratch with noise mixing
-python evaluate.py       # fits T/tau and generates reports
-python export_onnx.py    # exports the float32 graph and the INT8 deployment graph
-```
-
-The first training run downloads Google Speech Commands v0.02 (≈2.3 GB) and LibriSpeech (≈6.3 GB).
+The training pipeline downloads Google Speech Commands v0.02 (approximately 2.3 GB) and LibriSpeech (approximately 6.3 GB) on its first run.
 
 ---
 
@@ -296,34 +270,37 @@ Half of the eligible training clips are mixed with a noise source at a controlle
 python evaluate.py    # fits T/tau and generates reports
 ```
 
-`evaluate.py` computes the classification report, fits the temperature scaling parameter `T`, and sweeps the confidence threshold `tau` on the validation split. It writes all plots and text reports into `reports/model_v4.0/`.
+`evaluate.py` computes the classification report, fits the temperature scaling parameter `T`, and sweeps the confidence threshold `tau` on the validation split. It writes plots and text reports into the versioned directory under `reports/`.
 
 ---
 
-## Unified Web Interface
+## Web Interface
 
-`app.py` starts a two-tab Gradio application:
+The v4.1 web interface is a client-side Next.js application. ONNX Runtime Web executes the INT8 model with its WebAssembly backend; the browser handles audio capture, preprocessing and inference without sending audio to a server.
 
-### Real-time Keyword Spotting
+### Listen Mode
 
-Continuous microphone interface for live acceptance testing:
-- Select an input device and press **Start Listening**
-- A new 1.0 s window is classified every 0.5 s
-- A 1.5 s cooldown prevents overlapping windows from repeating the same command
-- Accepted commands appear in the detection history with their calibrated confidence
-- The status indicator shows idle, listening or error states
-- Closing or refreshing the tab releases the microphone
+Listen Mode continuously monitors the selected microphone and runs real-time detection on one-second audio windows with a 0.5-second hop. Recognized commands and confidence scores appear in the detection history.
 
-### Single Recording Analysis
+![Listen Mode: continuous real-time detection](reports/model_v4.1/Web-ListenMode.png)
 
-One-shot interface for threshold exploration:
-- Record with the browser or upload a clip
-- Clips of any length are analysed with a 1.0 s sliding window, so a 2-4 s recording does not need trimming
-- Choose the ONNX or PyTorch backend
-- Adjust the `tau` slider to see how the rejection threshold affects predictions
-- The result view shows the verdict, top-6 calibrated probabilities, the window the command was found in, and decision details
+### Analyze Mode
 
-Both tabs share the same model, calibration and inference runtime. Inference calls are serialized, so concurrent requests from multiple browser sessions are handled safely.
+Analyze Mode performs single-shot detection on a recorded or uploaded sample. It trims surrounding silence, centers the speech in the model's one-second input window, and presents the predicted command with calibrated confidence.
+
+![Analyze Mode: single-shot precise detection](reports/model_v4.1/Web-AnalyzeMode.png)
+
+### Model Info
+
+The Model Info view presents the model's technical specifications, including its ONNX format, input requirements and class set.
+
+![Model Info: ONNX model technical specifications](reports/model_v4.1/Web-ModelInfo.png)
+
+### Settings
+
+Settings allow users to select the microphone and adjust inference calibration parameters, including temperature and the confidence threshold.
+
+![Settings: microphone and inference configuration](reports/model_v4.1/Web-Settings.png)
 
 ---
 
@@ -331,9 +308,9 @@ Both tabs share the same model, calibration and inference runtime. Inference cal
 
 The model explicitly learns to reject via two non-command classes: `_silence_` (background noise) and `_unknown_` (LibriSpeech OOV speech).
 
-v4.0 re-fits the calibration on its new weights: **`T = 1.252585`** is fitted on the validation split, and **`tau* = 0.92`** is selected there by `min_cost` subject to a 90% coverage floor. The temperature is lower than v3.0's (`T = 1.3116`); that difference alone does not establish that the v4.0 logits are better calibrated or explain why the fitted temperature changed.
+The v4.1 calibration report records **`T = 1.252585`** and **`tau* = 0.92`**, fitted on the validation split with the `min_cost` criterion and a 90% minimum-coverage constraint. The temperature is lower than v3.0's (`T = 1.3116`); that difference alone does not establish that the v4.1 logits are better calibrated or explain why the fitted temperature changed.
 
-A clip is answered only when its calibrated top-1 probability reaches `tau`; otherwise, it is served as `_unknown_`. On the v4.0 weights, this buys precision (**99.57% retained accuracy** on answered clips) at the cost of coverage (**88.95%** of clips answered).
+A clip is answered only when its calibrated top-1 probability reaches `tau`; otherwise, it is served as `_unknown_`. At the v4.1 operating point, this yields **99.57% retained accuracy** on answered clips at **88.95% coverage**.
 
 ---
 
@@ -350,7 +327,7 @@ Both datasets are loaded via `torchaudio` using speaker-disjoint splits, ensurin
 
 ## Reproducibility and limitations
 
-**Reproducible today:** v4.0 training with noise mixing, evaluation and calibration; v3.x training, INT8 quantization and the application layer. Inference is available through the PyTorch, ONNX and INT8 backends.
+**Reproducible today:** v4.0 training with noise mixing, evaluation and calibration; v3.x training and INT8 quantization; and v4.1 client-side inference through ONNX Runtime Web.
 
 **Known gaps and limitations:**
 
@@ -415,4 +392,4 @@ The datasets keep their own terms (both CC BY 4.0). Model checkpoints published 
 ## Acknowledgements
 
 - **Google Speech Commands** and **LibriSpeech** for the datasets.
-- **Gradio**, **PyTorch**, **torchaudio**, and **ONNX Runtime** for the framework stack.
+- **Next.js**, **ONNX Runtime Web**, **PyTorch**, and **torchaudio** for the application and model pipeline.

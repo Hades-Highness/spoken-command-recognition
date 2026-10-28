@@ -10,7 +10,7 @@
     "ece_after": 0.007664,
     "nll_before": 0.239402,
     "nll_after": 0.195932,
-    "nll_before_train": null,
+    "nll_before_train": true,
     "threshold_criterion": "min_cost",
     "calibration_split": "validation (10979 samples)",
     "calibration_samples": 10979,

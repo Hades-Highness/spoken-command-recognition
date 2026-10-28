@@ -10,7 +10,7 @@
     "ece_after": 0.003696,
     "nll_before": 0.133495,
     "nll_after": 0.129083,
-    "nll_before_train": null,
+    "nll_before_train": true,
     "threshold_criterion": "min_cost",
     "calibration_split": "validation (10979 samples): activation ranges and T/tau; measured on testing (12105 samples)",
     "calibration_samples": 10979,

@@ -106,8 +106,7 @@ weighted avg     0.9623    0.9618    0.9618     12105
 NOTES
 ============================================================
 * Temperature scaling is applied to the logits before the softmax, so it never
-  changes the argmax: the top-1 accuracy of v2.1 and v2.2 is identical by
-  construction, and only the reported confidence changes.
+  changes the argmax
 * FRR and FAR are conditional rates: FRR is measured over the correct (raw)
   predictions and FAR over the incorrect ones, so they are directly comparable
   between operating points.
