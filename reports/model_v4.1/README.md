@@ -1,5 +1,13 @@
 # CommandSense v4.1 - Model Card
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Model%20Version-v4.1.0-7c3aed?style=for-the-badge" alt="Model Version">
+  <img src="https://img.shields.io/badge/PyTorch-Supported-EE4C2C?style=for-the-badge" alt="PyTorch">
+  <img src="https://img.shields.io/badge/ONNX-SUPPORTED-green?style=for-the-badge" alt="ONNX">
+  <img src="https://img.shields.io/badge/Classes-37-blue?style=for-the-badge" alt="37 Classes">
+</p>
+
+
 ---
 
 ## Model Overview
